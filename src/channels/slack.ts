@@ -5,6 +5,7 @@ import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { ChannelOpts, registerChannel } from './registry.js';
 import {
   Channel,
   OnInboundMessage,
@@ -213,6 +214,10 @@ export class SlackChannel implements Channel {
    * Sync channel metadata from Slack.
    * Fetches channels the bot is a member of and stores their names in the DB.
    */
+  async syncGroups(force: boolean): Promise<void> {
+    return this.syncChannelMetadata();
+  }
+
   async syncChannelMetadata(): Promise<void> {
     try {
       logger.info('Syncing channel metadata from Slack...');
@@ -285,3 +290,12 @@ export class SlackChannel implements Channel {
     }
   }
 }
+
+registerChannel('slack', (opts: ChannelOpts) => {
+  const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+  if (!env.SLACK_BOT_TOKEN || !env.SLACK_APP_TOKEN) {
+    logger.warn('Slack: SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set');
+    return null;
+  }
+  return new SlackChannel(opts);
+});
