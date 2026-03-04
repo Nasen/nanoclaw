@@ -64,7 +64,10 @@ async function getSDK(creds: RCCredentials): Promise<{
   const cached = sdkCache.get(key);
 
   const cacheToken = creds.botToken ?? creds.jwt ?? '';
-  if (cached && (cached.creds.botToken ?? cached.creds.jwt ?? '') === cacheToken) {
+  if (
+    cached &&
+    (cached.creds.botToken ?? cached.creds.jwt ?? '') === cacheToken
+  ) {
     const loggedIn = creds.botToken
       ? !!(await cached.platform.auth().data()).access_token
       : await cached.platform.loggedIn().catch(() => false);
@@ -203,12 +206,20 @@ export class RingCentralChannel implements Channel {
       // Explicit credentials provided by caller
       const { clientId, clientSecret, jwt, botToken, server } = opts.creds;
       if (!clientId || !clientSecret) {
-        throw new Error('RC credentials must include clientId and clientSecret');
+        throw new Error(
+          'RC credentials must include clientId and clientSecret',
+        );
       }
       if (!jwt && !botToken) {
         throw new Error('RC credentials must include jwt or botToken');
       }
-      this.creds = { clientId, clientSecret, jwt, botToken, server: server ?? DEFAULT_SERVER };
+      this.creds = {
+        clientId,
+        clientSecret,
+        jwt,
+        botToken,
+        server: server ?? DEFAULT_SERVER,
+      };
     } else {
       // Fall back to reading from env (legacy single-channel path)
       const env = readEnvFile([
@@ -219,7 +230,9 @@ export class RingCentralChannel implements Channel {
         'RC_SERVER',
       ]);
       if (!env.RC_CLIENT_ID || !env.RC_CLIENT_SECRET) {
-        throw new Error('RC_CLIENT_ID and RC_CLIENT_SECRET must be set in .env');
+        throw new Error(
+          'RC_CLIENT_ID and RC_CLIENT_SECRET must be set in .env',
+        );
       }
       if (!env.RC_JWT && !env.RC_BOT_TOKEN) {
         throw new Error('Either RC_JWT or RC_BOT_TOKEN must be set in .env');
@@ -250,9 +263,7 @@ export class RingCentralChannel implements Channel {
 
     // Install WebSocket extension with auto-reconnect
     const subscriptions = new Subscriptions({ sdk });
-    await (
-      subscriptions as unknown as { init?: () => Promise<void> }
-    ).init?.();
+    await (subscriptions as unknown as { init?: () => Promise<void> }).init?.();
 
     const wsExt = new WebSocketExtension({
       debugMode: false,
@@ -279,9 +290,7 @@ export class RingCentralChannel implements Channel {
 
     // Resolve bot's own extension ID for self-message detection
     try {
-      const resp = await platform.get(
-        '/restapi/v1.0/account/~/extension/~',
-      );
+      const resp = await platform.get('/restapi/v1.0/account/~/extension/~');
       const me = (await resp.json()) as { id?: string | number };
       this.botExtId = me?.id ? String(me.id) : undefined;
       logger.info({ botExtId: this.botExtId }, 'Connected to RingCentral TM');
@@ -379,9 +388,7 @@ export class RingCentralChannel implements Channel {
     if (postId && this.isOwn(postId)) return;
 
     const isBotMsg =
-      !!creatorId &&
-      this.botExtId !== undefined &&
-      creatorId === this.botExtId;
+      !!creatorId && this.botExtId !== undefined && creatorId === this.botExtId;
 
     const jid = `${this.jidPrefix}${chatId}`;
 
@@ -451,7 +458,10 @@ export class RingCentralChannel implements Channel {
   private isOwn(postId: string): boolean {
     const exp = this.sentIds.get(postId);
     if (exp === undefined) return false;
-    if (Date.now() > exp) { this.sentIds.delete(postId); return false; }
+    if (Date.now() > exp) {
+      this.sentIds.delete(postId);
+      return false;
+    }
     return true;
   }
 
