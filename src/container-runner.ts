@@ -208,6 +208,21 @@ function buildVolumeMounts(
     });
   }
 
+  // Figma in-house MCP server compiled JS (read-only)
+  const figmaMcpDir = path.join(
+    os.homedir(),
+    'Projects',
+    'figmainhousemcp',
+    'dist',
+  );
+  if (fs.existsSync(figmaMcpDir)) {
+    mounts.push({
+      hostPath: figmaMcpDir,
+      containerPath: '/workspace/figma-mcp',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -232,6 +247,10 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
     'NODE_TLS_REJECT_UNAUTHORIZED',
+    // Third-party MCP server credentials
+    'JIRA_TOKEN',
+    'CONFLUENCE_READ_TOKEN',
+    'GITLAB_PERSONAL_ACCESS_TOKEN',
   ]);
 }
 
