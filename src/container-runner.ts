@@ -286,6 +286,10 @@ function buildContainerArgs(
       'OUTLOOK_CLIENT_ID',
       'OUTLOOK_CLIENT_SECRET',
       'MS_TENANT_ID',
+      // Jenkins CI
+      'JENKINS_URL',
+      'JENKINS_USER',
+      'JENKINS_TOKEN',
     ]);
     for (const [key, value] of Object.entries(thirdPartyEnv)) {
       if (value) args.push('-e', `${key}=${value}`);

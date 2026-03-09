@@ -58,6 +58,13 @@ When someone asks what you can do, use this as your reference. Adapt the answer 
 • Key APIs: Team Messaging (posts, chats, persons), Presence (read/update own DND), Account & Extensions, Contacts
 • Auto-assistant mode: Nasen controls via "enable/disable auto-assistant" — when ON the agent replies to DMs on his behalf
 
+### Jenkins CI
+• Trigger builds, check status, read console logs, abort running builds
+• Credentials from env: JENKINS_URL, JENKINS_USER, JENKINS_TOKEN (Basic auth)
+• Full API reference with curl/node examples: /workspace/global/jenkins-api.md
+• Auth: Basic JENKINS_USER:JENKINS_TOKEN — all POST requests also need a CSRF crumb (see reference)
+• Key APIs: trigger build/buildWithParameters, lastBuild status, consoleText, queue, stop
+
 ### Gmail
 • Read inbox, search emails, compose and send (when Gmail is configured)
 
