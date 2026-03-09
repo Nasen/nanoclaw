@@ -23,10 +23,11 @@ const _require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const RcWsExtension = _require('@rc-ex/ws');
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { autoRegisterContact } from '../rc-auto-register.js';
 import {
   Channel,
   OnInboundMessage,
@@ -89,7 +90,75 @@ async function getSDK(creds: RCCredentials): Promise<{
       expires_in: String(3600 * 24 * 365), // treat as long-lived; refresh manually if expired
     });
   } else if (creds.jwt) {
-    await platform.login({ jwt: creds.jwt });
+    // FIX: RingCentral SDK's platform.login({ jwt }) sends client credentials incorrectly.
+    // Must use Basic Auth header instead of passing client_id/secret in request body.
+    // Manual token exchange using fetch with correct auth header.
+    const https = await import('https');
+    const authString = Buffer.from(
+      `${creds.clientId}:${creds.clientSecret}`,
+    ).toString('base64');
+
+    const postData = new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: creds.jwt,
+    }).toString();
+
+    const tokenResponse = await new Promise<{
+      access_token: string;
+      refresh_token?: string;
+      expires_in: number;
+    }>((resolve, reject) => {
+      const req = https.request(
+        `${creds.server}/restapi/oauth/token`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Authorization: `Basic ${authString}`,
+            'Content-Length': Buffer.byteLength(postData),
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => (data += chunk));
+          res.on('end', () => {
+            try {
+              const json = JSON.parse(data) as {
+                access_token?: string;
+                refresh_token?: string;
+                expires_in?: number;
+                error?: string;
+              };
+              if (json.access_token) {
+                resolve({
+                  access_token: json.access_token,
+                  refresh_token: json.refresh_token,
+                  expires_in: json.expires_in ?? 3600,
+                });
+              } else {
+                reject(
+                  new Error(`JWT token exchange failed: ${json.error ?? data}`),
+                );
+              }
+            } catch (e) {
+              reject(e);
+            }
+          });
+        },
+      );
+
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+
+    // Set the obtained token in the platform auth
+    await platform.auth().setData({
+      access_token: tokenResponse.access_token,
+      refresh_token: tokenResponse.refresh_token,
+      token_type: 'Bearer',
+      expires_in: String(tokenResponse.expires_in),
+    });
   } else {
     throw new Error('Either RC_JWT or RC_BOT_TOKEN must be set in .env');
   }
@@ -154,10 +223,29 @@ export interface RingCentralChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /**
+   * Called when auto-registration creates a new group so the caller can
+   * update its in-memory registered groups map immediately.
+   */
+  onRegisterGroup?: (jid: string, group: RegisteredGroup) => void;
   /** Channel name for logging/identification. Defaults to 'rc'. */
   name?: string;
   /** JID prefix for chats on this channel. Defaults to 'rc:'. */
   jidPrefix?: string;
+  /**
+   * Whether this channel should auto-register unknown contacts.
+   * Only the bot-token channel (rcb:) should do this.
+   * Defaults to false.
+   */
+  autoRegister?: boolean;
+  /**
+   * Called when the account owner (isBotMsg=true) sends a toggle command.
+   * Only the JWT/user channel (rc: prefix) should provide this callback.
+   */
+  onOwnerCommand?: (cmd: {
+    action: 'set_auto_assist';
+    value: boolean;
+  }) => Promise<void>;
   /** Explicit credentials. If omitted, reads from env (RC_CLIENT_ID, RC_CLIENT_SECRET, RC_JWT / RC_BOT_TOKEN). */
   creds?: {
     clientId: string;
@@ -395,14 +483,58 @@ export class RingCentralChannel implements Channel {
     // Always report metadata for group discovery
     this.opts.onChatMetadata(jid, timestamp, undefined, this.name, true);
 
-    const groups = this.opts.registeredGroups();
-    if (!groups[jid]) return;
+    // Owner command detection: Nasen's own messages (isBotMsg=true) can carry toggle
+    // commands. Intercepted BEFORE DB storage so only the account owner can trigger them.
+    if (isBotMsg && this.opts.onOwnerCommand) {
+      const toggleMatch = text.match(
+        /\b(enable|disable|turn\s+on|turn\s+off)\s+(auto[\s-]?assist|auto[\s-]?reply|auto[\s-]?response)\b/i,
+      );
+      if (toggleMatch) {
+        const enable = /enable|turn\s+on/i.test(toggleMatch[1]);
+        await this.opts.onOwnerCommand({ action: 'set_auto_assist', value: enable });
+        return; // do not store or route this message
+      }
+    }
 
+    // Resolve sender name early — needed for auto-registration lookup
     const senderName = isBotMsg
       ? ASSISTANT_NAME
       : ((creatorId ? await this.resolveUser(creatorId) : undefined) ??
         creatorId ??
         'unknown');
+
+    // Detect bot @mention — indicates a group/team chat interaction.
+    // In RC the mention format is ![:Person](extensionId).
+    const botMention = this.botExtId ? `![:Person](${this.botExtId})` : null;
+    const isGroupMention = !!botMention && text.includes(botMention);
+
+    let groups = this.opts.registeredGroups();
+    if (!groups[jid]) {
+      // Only the bot-token channel should auto-register unknown contacts.
+      // The JWT/user channel sees all RC events and must not register them.
+      if (!isBotMsg && this.opts.autoRegister) {
+        if (!isGroupMention) {
+          // Someone DM'd the bot extension directly. This bot is personal and
+          // only participates in team chats. Reply and drop the message.
+          await this.sendMessage(jid, "This is Nasen's personal mate, not accepting DMs.");
+          return;
+        }
+        const group = autoRegisterContact(
+          jid,
+          senderName,
+          chatId,
+          isGroupMention,
+          GROUPS_DIR,
+        );
+        if (!group) return;
+        // Update in-memory state immediately so this message is processed
+        this.opts.onRegisterGroup?.(jid, group);
+        groups = this.opts.registeredGroups();
+        if (!groups[jid]) return;
+      } else {
+        return;
+      }
+    }
 
     // Translate RC @mention (![:Person](id)) → @AssistantName for trigger matching
     let content = text;

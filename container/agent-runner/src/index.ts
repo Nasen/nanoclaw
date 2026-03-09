@@ -25,6 +25,8 @@ interface ContainerInput {
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
+  /** true = owner context (full MCP capabilities); false = proxy context (nanoclaw IPC only) */
+  personalMode?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
 }
@@ -408,12 +410,17 @@ async function runQuery(
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
-        'mcp__gmail__*',
-        'mcp__jira__*',
-        'mcp__testit__*',
-        'mcp__figma__*',
-        'mcp__gitlab__*',
-        'mcp__atlassian__*',
+        // Personal MCP tools: only available in owner context (isMain or rc-personal).
+        // External contacts (rc-john-lin, rc-grp-*, etc.) get nanoclaw IPC only.
+        ...(containerInput.personalMode ? [
+          'mcp__gmail__*',
+          'mcp__jira__*',
+          'mcp__testit__*',
+          'mcp__figma__*',
+          'mcp__gitlab__*',
+          'mcp__atlassian__*',
+          'mcp__m365__*',
+        ] : []),
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -429,50 +436,64 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        gmail: {
-          command: 'npx',
-          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-        },
-        jira: {
-          command: 'npx',
-          args: [
-            '-y',
-            '--registry=http://nexus3-xmn02.int.rclabenv.com/repository/npm-group/',
-            '@ringcentral/mcp-jira',
-          ],
-          env: { JIRA_TOKEN: sdkEnv['JIRA_TOKEN'] ?? '' },
-        },
-        testit: {
-          command: 'npx',
-          args: [
-            '-y',
-            '--registry',
-            'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
-            '@ringcentral/mcp-testit-fetcher',
-          ],
-        },
-        ...(fs.existsSync('/workspace/figma-mcp/index.js') ? {
-          figma: {
-            command: 'node',
-            args: ['/workspace/figma-mcp/index.js'],
+        // Personal MCP servers: only loaded in owner context (isMain or rc-personal).
+        // External contacts (rc-john-lin, rc-grp-*, etc.) cannot access personal data.
+        ...(containerInput.personalMode ? {
+          gmail: {
+            command: 'npx',
+            args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          },
+          jira: {
+            command: 'npx',
+            args: [
+              '-y',
+              '--registry=http://nexus3-xmn02.int.rclabenv.com/repository/npm-group/',
+              '@ringcentral/mcp-jira',
+            ],
+            env: { JIRA_TOKEN: sdkEnv['JIRA_TOKEN'] ?? '' },
+          },
+          testit: {
+            command: 'npx',
+            args: [
+              '-y',
+              '--registry',
+              'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
+              '@ringcentral/mcp-testit-fetcher',
+            ],
+          },
+          ...(fs.existsSync('/workspace/figma-mcp/index.js') ? {
+            figma: {
+              command: 'node',
+              args: ['/workspace/figma-mcp/index.js'],
+            },
+          } : {}),
+          gitlab: {
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-gitlab'],
+            env: {
+              GITLAB_PERSONAL_ACCESS_TOKEN: sdkEnv['GITLAB_PERSONAL_ACCESS_TOKEN'] ?? '',
+              GITLAB_API_URL: 'https://git.ringcentral.com/api/v4',
+            },
+          },
+          atlassian: {
+            type: 'http' as const,
+            url: 'https://mcp-atlassian.int.rclabenv.com/mcp/',
+            headers: {
+              'confluence-read-token': sdkEnv['CONFLUENCE_READ_TOKEN'] ?? '',
+              'jira-read-token': sdkEnv['JIRA_TOKEN'] ?? '',
+            },
+          },
+          m365: {
+            command: 'm365-mcp',
+            args: [],
+            env: {
+              MS_CLIENT_ID: sdkEnv['OUTLOOK_CLIENT_ID'] ?? '',
+              MS_CLIENT_SECRET: sdkEnv['OUTLOOK_CLIENT_SECRET'] ?? '',
+              MS_TENANT_ID: sdkEnv['MS_TENANT_ID'] ?? '',
+              USE_TEST_MODE: 'false',
+            },
           },
         } : {}),
-        gitlab: {
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-gitlab'],
-          env: {
-            GITLAB_PERSONAL_ACCESS_TOKEN: sdkEnv['GITLAB_PERSONAL_ACCESS_TOKEN'] ?? '',
-            GITLAB_API_URL: 'https://git.ringcentral.com/api/v4',
-          },
-        },
-        atlassian: {
-          type: 'http' as const,
-          url: 'https://mcp-atlassian.int.rclabenv.com/mcp/',
-          headers: {
-            'confluence-read-token': sdkEnv['CONFLUENCE_READ_TOKEN'] ?? '',
-            'jira-read-token': sdkEnv['JIRA_TOKEN'] ?? '',
-          },
-        },
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

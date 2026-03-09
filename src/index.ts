@@ -5,6 +5,7 @@ import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -46,6 +47,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
+import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -66,6 +68,9 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+// Auto-assist toggle for personal RC DMs — persisted in router_state DB.
+// OFF by default: Nasen handles his own DMs until he explicitly enables.
+let autoAssistEnabled = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -81,8 +86,9 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  autoAssistEnabled = getRouterState('auto_assist_enabled') === 'true';
   logger.info(
-    { groupCount: Object.keys(registeredGroups).length },
+    { groupCount: Object.keys(registeredGroups).length, autoAssistEnabled },
     'State loaded',
   );
 }
@@ -90,6 +96,12 @@ function loadState(): void {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+}
+
+function setAutoAssist(enabled: boolean): void {
+  autoAssistEnabled = enabled;
+  setRouterState('auto_assist_enabled', enabled ? 'true' : 'false');
+  logger.info({ enabled }, 'Auto-assist mode changed');
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -167,7 +179,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // Personal RC DMs: rc: prefix + isMain or personalFolder tier
+  const isPersonalRcDm =
+    chatJid.startsWith('rc:') &&
+    (group.isMain === true || isPersonalFolder(group.folder, GROUPS_DIR));
+
+  // Auto-assist gate: when OFF, stay silent.
+  // Cursor is NOT advanced → backlog accumulates and will be included as full
+  // context when Nasen re-enables auto-assist.
+  if (isPersonalRcDm && !autoAssistEnabled) {
+    logger.debug(
+      { group: group.name },
+      'Auto-assist OFF — skipping agent for personal RC DM',
+    );
+    return true;
+  }
+
+  // When auto-assist is ON, prepend context so the agent knows it's acting on behalf
+  const autoAssistPrefix =
+    isPersonalRcDm && autoAssistEnabled
+      ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
+      : '';
+
+  const prompt = autoAssistPrefix + formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -254,7 +288,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true;
+  const isMain = group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -302,6 +336,11 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
+        // personalMode gates which MCP servers are loaded in the container.
+        // The WA main group and rc-personal folder are owner context (full capabilities).
+        // All auto-registered external contacts (rc-john-lin, rc-grp-*, etc.) are proxy
+        // context: nanoclaw IPC only, no Gmail/Jira/GitLab/Confluence/Figma access.
+        personalMode: isMain || isPersonalFolder(group.folder, GROUPS_DIR),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -542,6 +581,24 @@ async function main(): Promise<void> {
         jwt: rcEnv.RC_JWT,
         server: rcEnv.RC_SERVER,
       },
+      onOwnerCommand: async (cmd) => {
+        if (cmd.action === 'set_auto_assist') {
+          setAutoAssist(cmd.value);
+          // Send confirmation to rc-personal (the isMain RC DM group)
+          const rcPersonalEntry = Object.entries(registeredGroups).find(
+            ([, g]) => g.folder === 'rc-personal',
+          );
+          if (rcPersonalEntry) {
+            const [rcPersonalJid] = rcPersonalEntry;
+            await rcChannel.sendMessage(
+              rcPersonalJid,
+              cmd.value
+                ? 'Auto-assistant mode *enabled*. I will respond to DMs on your behalf.'
+                : 'Auto-assistant mode *disabled*. DMs will be delivered to you directly.',
+            );
+          }
+        }
+      },
     });
     channels.push(rcChannel);
     try {
@@ -565,6 +622,11 @@ async function main(): Promise<void> {
       ...channelOpts,
       name: 'rc-bot',
       jidPrefix: 'rcb:',
+      // Only the bot channel auto-registers unknown contacts
+      autoRegister: true,
+      onRegisterGroup: (jid, group) => {
+        registeredGroups[jid] = group;
+      },
       creds: {
         clientId: rcEnv.RC_BOT_CLIENT_ID,
         clientSecret: rcEnv.RC_BOT_CLIENT_SECRET,
