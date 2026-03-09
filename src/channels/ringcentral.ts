@@ -491,7 +491,10 @@ export class RingCentralChannel implements Channel {
       );
       if (toggleMatch) {
         const enable = /enable|turn\s+on/i.test(toggleMatch[1]);
-        await this.opts.onOwnerCommand({ action: 'set_auto_assist', value: enable });
+        await this.opts.onOwnerCommand({
+          action: 'set_auto_assist',
+          value: enable,
+        });
         return; // do not store or route this message
       }
     }
@@ -516,7 +519,10 @@ export class RingCentralChannel implements Channel {
         if (!isGroupMention) {
           // Someone DM'd the bot extension directly. This bot is personal and
           // only participates in team chats. Reply and drop the message.
-          await this.sendMessage(jid, "This is Nasen's personal mate, not accepting DMs.");
+          await this.sendMessage(
+            jid,
+            "This is Nasen's personal mate, not accepting DMs.",
+          );
           return;
         }
         const group = autoRegisterContact(

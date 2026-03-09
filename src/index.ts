@@ -288,7 +288,8 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
+  const isMain =
+    group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
