@@ -32,8 +32,6 @@ Run `/update-nanoclaw` in Claude Code.
 
 **Validation**: runs `npm run build` and `npm test`.
 
-**Security scan**: after validation, scans the diff for (1) newly introduced secrets/credentials, (2) dangerous config patterns (disabled TLS, bypassed permissions), (3) new vulnerable dependencies via `npm audit`, (4) changed mount/container config. Blocks on any finding that needs user acknowledgment.
-
 **Breaking changes check**: after validation, reads CHANGELOG.md for any `[BREAKING]` entries introduced by the update. If found, shows each breaking change and offers to run the recommended skill to migrate.
 
 ## Rollback
@@ -184,59 +182,6 @@ If build fails:
 - Do not refactor unrelated code.
 - If unclear, ask the user before making changes.
 
-# Step 5.5: Security scan
-After validation passes, scan for security regressions introduced by the update.
-
-## 5.5a — Dependency audit
-If `package.json` or `package-lock.json` appear in the diff:
-```
-npm audit --audit-level=high
-```
-If new high/critical vulnerabilities are reported:
-- List the package names, CVE IDs, and severity.
-- Ask the user: proceed anyway, run `npm audit fix` first, or rollback?
-- Do not proceed silently past a critical vulnerability.
-
-## 5.5b — Secrets scan
-Scan the incoming diff for newly added credential-like strings:
-```
-git diff <backup-tag-from-step-1>..HEAD | grep -E '^[+][^+]' | grep -iE '(sk-ant-|xoxb-|xapp-|BEGIN.*(PRIVATE|RSA)|api[_-]?key\s*[:=]\s*["\x27][A-Za-z0-9._-]{20,}|password\s*[:=]\s*["\x27][^"\x27\s]{8,}|["\x27][A-Za-z0-9]{32,}["\x27])'
-```
-If any matches are found:
-- Show each matching line (mask the middle of the value, e.g. `sk-ant-***...***`).
-- Warn: "Upstream diff appears to contain credentials. Review before proceeding."
-- Ask user to confirm these are intentional test fixtures or false positives before continuing.
-- If confirmed malicious: rollback immediately with `git reset --hard <backup-tag>`.
-
-## 5.5c — Dangerous pattern scan
-Check for newly introduced dangerous configurations:
-```
-git diff <backup-tag-from-step-1>..HEAD | grep -E '^[+][^+]' | grep -E '(NODE_TLS_REJECT_UNAUTHORIZED|allowDangerouslySkipPermissions|bypassPermissions|--no-verify|dangerouslySkip)'
-```
-For each match found:
-- Show the file, line, and the matched pattern.
-- Explain the risk (e.g. "Disabling TLS verification exposes all API traffic to interception").
-- Ask user to confirm each is intentional before proceeding.
-
-## 5.5d — Mount and container config diff
-If any of these files changed in the diff:
-- `container/Dockerfile`
-- `src/container-runner.ts`
-- `src/mount-security.ts`
-- `src/config.ts`
-
-Show only the diff sections for those files:
-```
-git diff <backup-tag-from-step-1>..HEAD -- container/Dockerfile src/container-runner.ts src/mount-security.ts src/config.ts
-```
-Highlight any new `mounts.push(...)` calls, new env vars passed to containers, or new `readSecrets()` entries.
-Ask the user to confirm any new mounts or secrets forwarding are expected before proceeding.
-
-If the user wants to abort after reviewing the security scan, rollback:
-```
-git reset --hard <backup-tag-from-step-1>
-```
-
 # Step 6: Breaking changes check
 After validation succeeds, check if the update introduced any breaking changes.
 
@@ -249,7 +194,7 @@ Parse the diff output for lines starting with `+[BREAKING]`. Each such line is o
 ```
 
 If no `[BREAKING]` lines are found:
-- Skip this step silently. Proceed to Step 7.
+- Skip this step silently. Proceed to Step 7 (skill updates check).
 
 If one or more `[BREAKING]` lines are found:
 - Display a warning header to the user: "This update includes breaking changes that may require action:"
@@ -260,9 +205,20 @@ If one or more `[BREAKING]` lines are found:
   - "Skip — I'll handle these manually"
 - Set `multiSelect: true` so the user can pick multiple skills if there are several breaking changes.
 - For each skill the user selects, invoke it using the Skill tool.
-- After all selected skills complete (or if user chose Skip), proceed to Step 7.
+- After all selected skills complete (or if user chose Skip), proceed to Step 7 (skill updates check).
 
-# Step 7: Summary + rollback instructions
+# Step 7: Check for skill updates
+After the summary, check if skills are distributed as branches in this repo:
+- `git branch -r --list 'upstream/skill/*'`
+
+If any `upstream/skill/*` branches exist:
+- Use AskUserQuestion to ask: "Upstream has skill branches. Would you like to check for skill updates?"
+  - Option 1: "Yes, check for updates" (description: "Runs /update-skills to check for and apply skill branch updates")
+  - Option 2: "No, skip" (description: "You can run /update-skills later any time")
+- If user selects yes, invoke `/update-skills` using the Skill tool.
+- After the skill completes (or if user selected no), proceed to Step 8.
+
+# Step 8: Summary + rollback instructions
 Show:
 - Backup tag: the tag name created in Step 1
 - New HEAD: `git rev-parse --short HEAD`
