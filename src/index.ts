@@ -45,20 +45,22 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { startIpcWatcher } from './ipc.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import {
   groupNeedsTrigger,
   hasAllowedTrigger,
   isPersonalRcDm,
 } from './message-gating.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { findChannel, formatMessages } from './router.js';
 import {
   isSenderAllowed,
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
-import { startSchedulerLoop } from './task-scheduler.js';
+import {
+  registerShutdownHandlers,
+  startSubsystems,
+} from './orchestrator-runtime.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -517,17 +519,7 @@ async function main(): Promise<void> {
     CREDENTIAL_PROXY_PORT,
     PROXY_BIND_HOST,
   );
-
-  // Graceful shutdown handlers
-  const shutdown = async (signal: string) => {
-    logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
-    await queue.shutdown(10000);
-    for (const ch of channels) await ch.disconnect();
-    process.exit(0);
-  };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  registerShutdownHandlers(proxyServer, queue, channels);
 
   const channelOpts = buildChannelOpts();
   await connectInstalledChannels(channels, channelOpts);
@@ -546,45 +538,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Start subsystems (independently of connection handler)
-  startSchedulerLoop({
+  startSubsystems({
+    channels,
+    queue,
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
-    queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
-        return;
-      }
-      const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
-    },
-  });
-  startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
-    },
-    registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroups: async (force: boolean) => {
-      await Promise.all(
-        channels
-          .filter((ch) => ch.syncGroups)
-          .map((ch) => ch.syncGroups!(force)),
-      );
-    },
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) =>
-      writeGroupsSnapshot(gf, im, ag, rj),
+    processGroupMessages,
+    recoverPendingMessages,
+    startMessageLoop,
   });
-  queue.setProcessMessagesFn(processGroupMessages);
-  recoverPendingMessages();
-  startMessageLoop();
 }
 
 // Guard: only run when executed directly, not when imported by tests
