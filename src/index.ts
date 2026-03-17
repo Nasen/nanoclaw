@@ -34,7 +34,6 @@ import {
   getAllSessions,
   getAllTasks,
   getMessagesSince,
-  getNewMessages,
   getRegisteredGroup,
   getRouterState,
   initDatabase,
@@ -46,6 +45,10 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
+import {
+  recoverPendingMessages as recoverPendingMessagesForGroups,
+  startMessageLoop as startPollingMessageLoop,
+} from './message-loop.js';
 import {
   groupNeedsTrigger,
   hasAllowedTrigger,
@@ -71,7 +74,6 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
-let messageLoopRunning = false;
 // Auto-assist toggle for personal RC DMs — persisted in router_state DB.
 // OFF by default: Nasen handles his own DMs until he explicitly enables.
 let autoAssistEnabled = false;
@@ -394,95 +396,20 @@ async function runAgent(
 }
 
 async function startMessageLoop(): Promise<void> {
-  if (messageLoopRunning) {
-    logger.debug('Message loop already running, skipping duplicate start');
-    return;
-  }
-  messageLoopRunning = true;
-
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
-
-  while (true) {
-    try {
-      const jids = Object.keys(registeredGroups);
-      const { messages, newTimestamp } = getNewMessages(
-        jids,
-        lastTimestamp,
-        ASSISTANT_NAME,
-      );
-
-      if (messages.length > 0) {
-        logger.info({ count: messages.length }, 'New messages');
-
-        // Advance the "seen" cursor for all messages immediately
-        lastTimestamp = newTimestamp;
-        saveState();
-
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
-        for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
-          if (existing) {
-            existing.push(msg);
-          } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
-          }
-        }
-
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
-          if (!group) continue;
-
-          const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            console.log(
-              `Warning: no channel owns JID ${chatJid}, skipping messages`,
-            );
-            continue;
-          }
-
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
-          if (groupNeedsTrigger(group)) {
-            const allowlistCfg = loadSenderAllowlist();
-            if (!hasAllowedTrigger(chatJid, groupMessages, allowlistCfg)) {
-              continue;
-            }
-          }
-
-          // Pull all messages since lastAgentTimestamp so non-trigger
-          // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
-            chatJid,
-            lastAgentTimestamp[chatJid] || '',
-            ASSISTANT_NAME,
-          );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
-
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
-            );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true);
-          } else {
-            // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
-          }
-        }
-      }
-    } catch (err) {
-      logger.error({ err }, 'Error in message loop');
-    }
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
-  }
+  await startPollingMessageLoop({
+    channels,
+    queue,
+    registeredGroups: () => registeredGroups,
+    getLastTimestamp: () => lastTimestamp,
+    setLastTimestamp: (timestamp) => {
+      lastTimestamp = timestamp;
+    },
+    getLastAgentTimestamp: (chatJid) => lastAgentTimestamp[chatJid] || '',
+    setLastAgentTimestamp: (chatJid, timestamp) => {
+      lastAgentTimestamp[chatJid] = timestamp;
+    },
+    saveState,
+  });
 }
 
 /**
@@ -490,17 +417,11 @@ async function startMessageLoop(): Promise<void> {
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
-  for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
-    if (pending.length > 0) {
-      logger.info(
-        { group: group.name, pendingCount: pending.length },
-        'Recovery: found unprocessed messages',
-      );
-      queue.enqueueMessageCheck(chatJid);
-    }
-  }
+  recoverPendingMessagesForGroups(
+    registeredGroups,
+    (chatJid) => lastAgentTimestamp[chatJid] || '',
+    queue,
+  );
 }
 
 function ensureContainerSystemRunning(): void {
