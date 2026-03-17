@@ -19,9 +19,6 @@ import {
 } from './channel-bootstrap.js';
 import {
   ContainerOutput,
-  runContainerAgent,
-  writeGroupsSnapshot,
-  writeTasksSnapshot,
 } from './container-runner.js';
 import {
   cleanupOrphans,
@@ -32,9 +29,6 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
-  getAllTasks,
-  getMessagesSince,
-  getRegisteredGroup,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -44,17 +38,15 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import {
   recoverPendingMessages as recoverPendingMessagesForGroups,
   startMessageLoop as startPollingMessageLoop,
 } from './message-loop.js';
+import { formatMessages } from './router.js';
 import {
-  groupNeedsTrigger,
-  hasAllowedTrigger,
-  isPersonalRcDm,
-} from './message-gating.js';
-import { findChannel, formatMessages } from './router.js';
+  processGroupMessages as processGroupMessagesForChat,
+  runGroupAgent,
+} from './group-agent-runner.js';
 import {
   isSenderAllowed,
   loadSenderAllowlist,
@@ -185,128 +177,24 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
-  if (!group) return true;
-
-  const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-    return true;
-  }
-
-  const isMainGroup = group.isMain === true;
-
-  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(
-    chatJid,
-    sinceTimestamp,
-    ASSISTANT_NAME,
-  );
-
-  if (missedMessages.length === 0) return true;
-
-  if (groupNeedsTrigger(group)) {
-    const allowlistCfg = loadSenderAllowlist();
-    if (!hasAllowedTrigger(chatJid, missedMessages, allowlistCfg)) return true;
-  }
-
-  // Auto-assist gate: when OFF, stay silent.
-  // Cursor is NOT advanced → backlog accumulates and will be included as full
-  // context when Nasen re-enables auto-assist.
-  const personalRcDm = isPersonalRcDm(chatJid, group);
-  if (personalRcDm && !autoAssistEnabled) {
-    logger.debug(
-      { group: group.name },
-      'Auto-assist OFF — skipping agent for personal RC DM',
-    );
-    return true;
-  }
-
-  // When auto-assist is ON, prepend context so the agent knows it's acting on behalf
-  const autoAssistPrefix =
-    personalRcDm && autoAssistEnabled
-      ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
-      : '';
-
-  const prompt = autoAssistPrefix + formatMessages(missedMessages, TIMEZONE);
-
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
-  const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
-  saveState();
-
-  logger.info(
-    { group: group.name, messageCount: missedMessages.length },
-    'Processing messages',
-  );
-
-  // Track idle timer for closing stdin when agent is idle
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
-  };
-
-  await channel.setTyping?.(chatJid, true);
-  let hadError = false;
-  let outputSentToUser = false;
-
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
+  return processGroupMessagesForChat(chatJid, {
+    channels,
+    queue,
+    getRegisteredGroup: (jid) => registeredGroups[jid],
+    getLastAgentTimestamp: (jid) => lastAgentTimestamp[jid] || '',
+    setLastAgentTimestamp: (jid, timestamp) => {
+      lastAgentTimestamp[jid] = timestamp;
+    },
+    saveState,
+    autoAssistEnabled: () => autoAssistEnabled,
+    getSessionId: (groupFolder) => sessions[groupFolder],
+    setSessionId: (groupFolder, sessionId) => {
+      sessions[groupFolder] = sessionId;
+      setSession(groupFolder, sessionId);
+    },
+    getAvailableGroups,
+    getRegisteredJids: () => new Set(Object.keys(registeredGroups)),
   });
-
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
-
-  if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
-      logger.warn(
-        { group: group.name },
-        'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
-      );
-      return true;
-    }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
-    saveState();
-    logger.warn(
-      { group: group.name },
-      'Agent error, rolled back message cursor for retry',
-    );
-    return false;
-  }
-
-  return true;
 }
 
 async function runAgent(
@@ -315,84 +203,22 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain =
-    group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
-  const sessionId = sessions[group.folder];
-
-  // Update tasks snapshot for container to read (filtered by group)
-  const tasks = getAllTasks();
-  writeTasksSnapshot(
-    group.folder,
-    isMain,
-    tasks.map((t) => ({
-      id: t.id,
-      groupFolder: t.group_folder,
-      prompt: t.prompt,
-      schedule_type: t.schedule_type,
-      schedule_value: t.schedule_value,
-      status: t.status,
-      next_run: t.next_run,
-    })),
-  );
-
-  // Update available groups snapshot (main group only can see all groups)
-  const availableGroups = getAvailableGroups();
-  writeGroupsSnapshot(
-    group.folder,
-    isMain,
-    availableGroups,
-    new Set(Object.keys(registeredGroups)),
-  );
-
-  // Wrap onOutput to track session ID from streamed results
-  const wrappedOnOutput = onOutput
-    ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
-        }
-        await onOutput(output);
-      }
-    : undefined;
-
-  try {
-    const output = await runContainerAgent(
-      group,
-      {
-        prompt,
-        sessionId,
-        groupFolder: group.folder,
-        chatJid,
-        isMain,
-        // personalMode gates which MCP servers are loaded in the container.
-        // The WA main group and rc-personal folder are owner context (full capabilities).
-        // All auto-registered external contacts (rc-john-lin, rc-grp-*, etc.) are proxy
-        // context: nanoclaw IPC only, no Gmail/Jira/GitLab/Confluence/Figma access.
-        personalMode: isMain || isPersonalFolder(group.folder, GROUPS_DIR),
+  return runGroupAgent(
+    group,
+    prompt,
+    chatJid,
+    {
+      queue,
+      getSessionId: (groupFolder) => sessions[groupFolder],
+      setSessionId: (groupFolder, sessionId) => {
+        sessions[groupFolder] = sessionId;
+        setSession(groupFolder, sessionId);
       },
-      (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
-    );
-
-    if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
-
-    if (output.status === 'error') {
-      logger.error(
-        { group: group.name, error: output.error },
-        'Container agent error',
-      );
-      return 'error';
-    }
-
-    return 'success';
-  } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
-  }
+      getAvailableGroups,
+      getRegisteredJids: () => new Set(Object.keys(registeredGroups)),
+    },
+    onOutput,
+  );
 }
 
 async function startMessageLoop(): Promise<void> {
