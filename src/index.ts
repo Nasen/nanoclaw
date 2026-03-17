@@ -9,7 +9,6 @@ import {
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
-  TRIGGER_PATTERN,
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
@@ -48,10 +47,14 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
+import {
+  groupNeedsTrigger,
+  hasAllowedTrigger,
+  isPersonalRcDm,
+} from './message-gating.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
-  isTriggerAllowed,
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
@@ -168,26 +171,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  if (groupNeedsTrigger(group)) {
     const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
+    if (!hasAllowedTrigger(chatJid, missedMessages, allowlistCfg)) return true;
   }
-
-  // Personal RC DMs: rc: prefix + isMain or personalFolder tier
-  const isPersonalRcDm =
-    chatJid.startsWith('rc:') &&
-    (group.isMain === true || isPersonalFolder(group.folder, GROUPS_DIR));
 
   // Auto-assist gate: when OFF, stay silent.
   // Cursor is NOT advanced → backlog accumulates and will be included as full
   // context when Nasen re-enables auto-assist.
-  if (isPersonalRcDm && !autoAssistEnabled) {
+  const personalRcDm = isPersonalRcDm(chatJid, group);
+  if (personalRcDm && !autoAssistEnabled) {
     logger.debug(
       { group: group.name },
       'Auto-assist OFF — skipping agent for personal RC DM',
@@ -197,7 +190,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // When auto-assist is ON, prepend context so the agent knows it's acting on behalf
   const autoAssistPrefix =
-    isPersonalRcDm && autoAssistEnabled
+    personalRcDm && autoAssistEnabled
       ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
       : '';
 
@@ -416,21 +409,14 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
-          if (needsTrigger) {
+          if (groupNeedsTrigger(group)) {
             const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                TRIGGER_PATTERN.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
+            if (!hasAllowedTrigger(chatJid, groupMessages, allowlistCfg)) {
+              continue;
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
