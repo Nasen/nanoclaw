@@ -5,7 +5,6 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
-import { handleXIpc } from './x-ipc.js';
 
 export interface TaskIpcData {
   type: string;
@@ -274,17 +273,7 @@ export async function processTaskIpc(
         requiresTrigger: data.requiresTrigger,
       });
       break;
-
-    default: {
-      const handled = await handleXIpc(
-        data as unknown as Record<string, unknown>,
-        sourceGroup,
-        isMain,
-        DATA_DIR,
-      );
-      if (!handled) {
-        logger.warn({ type: data.type }, 'Unknown IPC task type');
-      }
-    }
+    default:
+      logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
 }
