@@ -194,7 +194,7 @@ curl -s -X POST -u "$JENKINS_AUTH" -H "$CRUMB" \
 
 ## Folder / Nested Jobs
 
-RingCentral Jenkins often uses Folders or Multibranch Pipelines:
+Some Jenkins installations use Folders or Multibranch Pipelines:
 
 ```bash
 # List jobs in a folder

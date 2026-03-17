@@ -1,6 +1,6 @@
 # RingCentral API Reference
 
-Credentials are available as environment variables (injected by NanoClaw for personalMode agents):
+Credentials are available as environment variables when this integration is configured:
 - `RC_CLIENT_ID` / `RC_CLIENT_SECRET` — your REST API app credentials
 - `RC_JWT` — personal JWT for account-owner auth
 - `RC_SERVER` — API host (defaults to `https://platform.ringcentral.com`)
@@ -146,7 +146,7 @@ curl -s "${RC_SERVER}/restapi/v1.0/account/~/extension?page=1&perPage=100" \
 ### Look up extension by email or name
 
 ```bash
-curl -s "${RC_SERVER}/restapi/v1.0/account/~/extension?email=user@ringcentral.com" \
+curl -s "${RC_SERVER}/restapi/v1.0/account/~/extension?email=user@example.com" \
   -H "Authorization: Bearer $TOKEN"
 ```
 

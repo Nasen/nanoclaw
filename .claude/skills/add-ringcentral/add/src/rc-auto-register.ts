@@ -2,13 +2,14 @@
  * RC Group Chat Auto-Registration
  *
  * Auto-registers unknown RC group/team chats when the bot is @mentioned.
- * DMs to the bot extension are silently rejected — this bot is personal and
- * only participates in team chats where Nasen is already present.
+ * DMs to the bot extension are silently rejected — this bot is intended for
+ * team chats rather than private bot DMs.
  *
  * Folder: rc-grp-{chatId}  (stable regardless of who @mentions)
  * requiresTrigger: true    (only @Bob mentions trigger a response)
  *
- * Nasen's own DM (rc-personal) is pre-registered and never hits this path.
+ * The owner's direct chat (for example `rc-personal`) is expected to be
+ * registered separately and never hits this path.
  *
  * Toggle with groups/direct-contacts.json: { "enabled": false }
  */
@@ -72,43 +73,28 @@ export function isPersonalFolder(folder: string, groupsDir: string): boolean {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildGroupClaudeMd(): string {
-  return `# Bob — Nasen's Representative (Group Chat)
+  return `# Bob — Group Representative
 
-You are Bob, acting as Nasen You when @mentioned in a RingCentral team or group chat.
+You are Bob, acting on behalf of the workspace owner when @mentioned in a RingCentral team or group chat.
 
 Only respond when directly @mentioned. Be concise — you are speaking in a group,
 so keep replies focused and professional.
 
 ## Personal Context
 
-Load from /workspace/global/personal/ at the start of every session:
-- identity.md — Who Nasen is
-- voice.md — How Nasen communicates
-- contacts.md — Key relationships
-- preferences.md — Nasen's decision patterns
+If present, load relevant context from /workspace/global/personal/ at the start of every session:
+- identity.md — who the owner is
+- voice.md — how the owner communicates
+- contacts.md — key relationships
+- preferences.md — decision patterns
 
 Use this knowledge to inform your responses. Do not quote these files verbatim.
 
-## Org Database
-
-Full RC org at /workspace/global/org.db — query with Python3 when needed:
-
-\`\`\`bash
-python3 - << 'EOF'
-import sqlite3
-con = sqlite3.connect('/workspace/global/org.db')
-con.row_factory = sqlite3.Row
-rows = con.execute("SELECT full_name, title, direct_manager, team_name FROM employees WHERE full_name LIKE '%Name%'").fetchall()
-for r in rows: print(dict(r))
-EOF
-\`\`\`
-
 ## Core Behavior
 
-You ARE Nasen — write as him, make decisions as he would.
+You are representing the owner. Match their documented voice and communication style.
 
-Respond to the person who @mentioned you, matching Nasen's voice and relationship
-to that person. Check contacts.md and preferences.md before responding.
+Respond to the person who @mentioned you, using the available context to stay consistent.
 
 For high-stakes decisions (headcount, budget, commitments):
 "Let me check on that and get back to you."
@@ -128,8 +114,7 @@ Wrap internal reasoning in \`<internal>\` tags — not sent to the user.
 
 /**
  * Auto-register an unknown RC group/team chat on first @mention.
- * DMs are rejected unconditionally — only team chats where Nasen is present
- * are supported.
+ * DMs are rejected unconditionally — only team chats are supported.
  *
  * @param jid             Full JID (e.g. rcb:12345)
  * @param senderName      Resolved display name of the message sender
@@ -147,8 +132,7 @@ export function autoRegisterContact(
   isGroupMention: boolean,
   groupsDir: string,
 ): RegisteredGroup | null {
-  // DMs to the bot extension are not supported. This bot is personal and should
-  // only participate in team chats where Nasen is already present.
+  // DMs to the bot extension are not supported. This path is only for team chats.
   if (!isGroupMention) return null;
 
   if (!isEnabled(groupsDir)) return null;
