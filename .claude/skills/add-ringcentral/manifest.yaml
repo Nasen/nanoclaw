@@ -1,0 +1,29 @@
+skill: ringcentral
+version: 1.0.0
+description: "RingCentral Team Messaging channel with optional bot add-in auto-registration"
+core_version: 0.1.0
+adds:
+  - src/channels/ringcentral.ts
+  - src/rc-auto-register.ts
+modifies:
+  - src/index.ts
+  - src/channel-bootstrap.ts
+  - src/container-config.ts
+  - src/group-agent-runner.ts
+  - src/message-gating.ts
+structured:
+  npm_dependencies:
+    "@rc-ex/ws": "^1.3.17"
+    "@ringcentral/sdk": "^5.0.6"
+    "@ringcentral/subscriptions": "^5.0.6"
+  env_additions:
+    - RC_CLIENT_ID
+    - RC_CLIENT_SECRET
+    - RC_JWT
+    - RC_SERVER
+    - RC_BOT_CLIENT_ID
+    - RC_BOT_CLIENT_SECRET
+    - RC_BOT_TOKEN
+conflicts: []
+depends: []
+test: "npx vitest run .claude/skills/add-ringcentral/tests/ringcentral.test.ts"
