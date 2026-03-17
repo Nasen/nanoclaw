@@ -4,6 +4,8 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
   TIMEZONE,
@@ -15,6 +17,7 @@ import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
+import { RingCentralChannel } from './channels/ringcentral.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -43,14 +46,9 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import {
-  restoreRemoteControl,
-  startRemoteControl,
-  stopRemoteControl,
-} from './remote-control.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -60,6 +58,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { readEnvFile } from './env.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -69,6 +68,9 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+// Auto-assist toggle for personal RC DMs — persisted in router_state DB.
+// OFF by default: Nasen handles his own DMs until he explicitly enables.
+let autoAssistEnabled = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -84,8 +86,9 @@ function loadState(): void {
   }
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  autoAssistEnabled = getRouterState('auto_assist_enabled') === 'true';
   logger.info(
-    { groupCount: Object.keys(registeredGroups).length },
+    { groupCount: Object.keys(registeredGroups).length, autoAssistEnabled },
     'State loaded',
   );
 }
@@ -95,22 +98,18 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
-function registerGroup(jid: string, group: RegisteredGroup): void {
-  let groupDir: string;
-  try {
-    groupDir = resolveGroupFolderPath(group.folder);
-  } catch (err) {
-    logger.warn(
-      { jid, folder: group.folder, err },
-      'Rejecting group registration with invalid folder',
-    );
-    return;
-  }
+function setAutoAssist(enabled: boolean): void {
+  autoAssistEnabled = enabled;
+  setRouterState('auto_assist_enabled', enabled ? 'true' : 'false');
+  logger.info({ enabled }, 'Auto-assist mode changed');
+}
 
+function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
   // Create group folder
+  const groupDir = path.join(DATA_DIR, '..', 'groups', group.folder);
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
   logger.info(
@@ -154,7 +153,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const channel = findChannel(channels, chatJid);
   if (!channel) {
-    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+    console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
     return true;
   }
 
@@ -180,7 +179,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  // Personal RC DMs: rc: prefix + isMain or personalFolder tier
+  const isPersonalRcDm =
+    chatJid.startsWith('rc:') &&
+    (group.isMain === true || isPersonalFolder(group.folder, GROUPS_DIR));
+
+  // Auto-assist gate: when OFF, stay silent.
+  // Cursor is NOT advanced → backlog accumulates and will be included as full
+  // context when Nasen re-enables auto-assist.
+  if (isPersonalRcDm && !autoAssistEnabled) {
+    logger.debug(
+      { group: group.name },
+      'Auto-assist OFF — skipping agent for personal RC DM',
+    );
+    return true;
+  }
+
+  // When auto-assist is ON, prepend context so the agent knows it's acting on behalf
+  const autoAssistPrefix =
+    isPersonalRcDm && autoAssistEnabled
+      ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
+      : '';
+
+  const prompt = autoAssistPrefix + formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -230,10 +251,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
-
     if (result.status === 'error') {
       hadError = true;
     }
@@ -271,7 +288,8 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.isMain === true;
+  const isMain =
+    group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -319,7 +337,11 @@ async function runAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
-        assistantName: ASSISTANT_NAME,
+        // personalMode gates which MCP servers are loaded in the container.
+        // The WA main group and rc-personal folder are owner context (full capabilities).
+        // All auto-registered external contacts (rc-john-lin, rc-grp-*, etc.) are proxy
+        // context: nanoclaw IPC only, no Gmail/Jira/GitLab/Confluence/Figma access.
+        personalMode: isMain || isPersonalFolder(group.folder, GROUPS_DIR),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -388,7 +410,9 @@ async function startMessageLoop(): Promise<void> {
 
           const channel = findChannel(channels, chatJid);
           if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
+            console.log(
+              `Warning: no channel owns JID ${chatJid}, skipping messages`,
+            );
             continue;
           }
 
@@ -429,11 +453,7 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
-              ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-              );
+            channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -475,7 +495,6 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
-  restoreRemoteControl();
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
@@ -494,60 +513,9 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Handle /remote-control and /remote-control-end commands
-  async function handleRemoteControl(
-    command: string,
-    chatJid: string,
-    msg: NewMessage,
-  ): Promise<void> {
-    const group = registeredGroups[chatJid];
-    if (!group?.isMain) {
-      logger.warn(
-        { chatJid, sender: msg.sender },
-        'Remote control rejected: not main group',
-      );
-      return;
-    }
-
-    const channel = findChannel(channels, chatJid);
-    if (!channel) return;
-
-    if (command === '/remote-control') {
-      const result = await startRemoteControl(
-        msg.sender,
-        chatJid,
-        process.cwd(),
-      );
-      if (result.ok) {
-        await channel.sendMessage(chatJid, result.url);
-      } else {
-        await channel.sendMessage(
-          chatJid,
-          `Remote Control failed: ${result.error}`,
-        );
-      }
-    } else {
-      const result = stopRemoteControl();
-      if (result.ok) {
-        await channel.sendMessage(chatJid, 'Remote Control session ended.');
-      } else {
-        await channel.sendMessage(chatJid, result.error);
-      }
-    }
-  }
-
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
-      const trimmed = msg.content.trim();
-      if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
-        handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
-          logger.error({ err, chatJid }, 'Remote control command error'),
-        );
-        return;
-      }
-
       // Sender allowlist drop mode: discard messages from denied senders before storing
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();
@@ -576,9 +544,7 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
   };
 
-  // Create and connect all registered channels.
-  // Each channel self-registers via the barrel import above.
-  // Factories return null when credentials are missing, so unconfigured channels are skipped.
+  // Create and connect registered channels (WhatsApp, Slack, etc. via barrel import).
   for (const channelName of getRegisteredChannelNames()) {
     const factory = getChannelFactory(channelName)!;
     const channel = factory(channelOpts);
@@ -592,6 +558,95 @@ async function main(): Promise<void> {
     channels.push(channel);
     await channel.connect();
   }
+
+  // RingCentral channels (dual auth — not using registry due to two simultaneous instances).
+  const rcEnv = readEnvFile([
+    'RC_CLIENT_ID',
+    'RC_CLIENT_SECRET',
+    'RC_JWT',
+    'RC_SERVER',
+    'RC_BOT_CLIENT_ID',
+    'RC_BOT_CLIENT_SECRET',
+    'RC_BOT_TOKEN',
+  ]);
+
+  // REST API App (user account / JWT auth) → jid prefix 'rc:'
+  if (rcEnv.RC_CLIENT_ID && rcEnv.RC_CLIENT_SECRET && rcEnv.RC_JWT) {
+    const rcChannel = new RingCentralChannel({
+      ...channelOpts,
+      name: 'rc',
+      jidPrefix: 'rc:',
+      creds: {
+        clientId: rcEnv.RC_CLIENT_ID,
+        clientSecret: rcEnv.RC_CLIENT_SECRET,
+        jwt: rcEnv.RC_JWT,
+        server: rcEnv.RC_SERVER,
+      },
+      onOwnerCommand: async (cmd) => {
+        if (cmd.action === 'set_auto_assist') {
+          setAutoAssist(cmd.value);
+          // Send confirmation to rc-personal (the isMain RC DM group)
+          const rcPersonalEntry = Object.entries(registeredGroups).find(
+            ([, g]) => g.folder === 'rc-personal',
+          );
+          if (rcPersonalEntry) {
+            const [rcPersonalJid] = rcPersonalEntry;
+            await rcChannel.sendMessage(
+              rcPersonalJid,
+              cmd.value
+                ? 'Auto-assistant mode *enabled*. I will respond to DMs on your behalf.'
+                : 'Auto-assistant mode *disabled*. DMs will be delivered to you directly.',
+            );
+          }
+        }
+      },
+    });
+    channels.push(rcChannel);
+    try {
+      await rcChannel.connect();
+    } catch (err) {
+      logger.error(
+        { err },
+        'RingCentral (REST API) channel failed to connect — service continues without it',
+      );
+      channels.splice(channels.indexOf(rcChannel), 1);
+    }
+  }
+
+  // Bot Add-in (bot identity / token auth) → jid prefix 'rcb:'
+  if (
+    rcEnv.RC_BOT_CLIENT_ID &&
+    rcEnv.RC_BOT_CLIENT_SECRET &&
+    rcEnv.RC_BOT_TOKEN
+  ) {
+    const rcBotChannel = new RingCentralChannel({
+      ...channelOpts,
+      name: 'rc-bot',
+      jidPrefix: 'rcb:',
+      // Only the bot channel auto-registers unknown contacts
+      autoRegister: true,
+      onRegisterGroup: (jid, group) => {
+        registeredGroups[jid] = group;
+      },
+      creds: {
+        clientId: rcEnv.RC_BOT_CLIENT_ID,
+        clientSecret: rcEnv.RC_BOT_CLIENT_SECRET,
+        botToken: rcEnv.RC_BOT_TOKEN,
+        server: rcEnv.RC_SERVER,
+      },
+    });
+    channels.push(rcBotChannel);
+    try {
+      await rcBotChannel.connect();
+    } catch (err) {
+      logger.error(
+        { err },
+        'RingCentral (Bot Add-in) channel failed to connect — service continues without it',
+      );
+      channels.splice(channels.indexOf(rcBotChannel), 1);
+    }
+  }
+
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
@@ -607,7 +662,7 @@ async function main(): Promise<void> {
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
-        logger.warn({ jid }, 'No channel owns JID, cannot send message');
+        console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
         return;
       }
       const text = formatOutbound(rawText);
@@ -635,10 +690,7 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  startMessageLoop().catch((err) => {
-    logger.fatal({ err }, 'Message loop crashed unexpectedly');
-    process.exit(1);
-  });
+  startMessageLoop();
 }
 
 // Guard: only run when executed directly, not when imported by tests

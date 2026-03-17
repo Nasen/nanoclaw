@@ -16,11 +16,12 @@ groups/*
 groups/main/*
 groups/global/*
 !groups/main/CLAUDE.md
-!groups/global/CLAUDE.md
+!groups/global/*.md
 
 # Secrets
 *.keys.json
 .env
+.mcp.json
 
 # Temp files
 .tmp-*
@@ -31,6 +32,11 @@ groups/global/*
 # IDE
 .idea/
 .vscode/
+.claude/settings.local.json
+.claude/skills/x-integration/host.js
+.claude/skills/x-integration/host.js.map
+.claude/skills/x-integration/host.d.ts
+.claude/skills/x-integration/host.d.ts.map
 
 # Skills system (local per-installation state)
 .nanoclaw/

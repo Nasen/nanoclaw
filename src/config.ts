@@ -71,3 +71,9 @@ export const TRIGGER_PATTERN = new RegExp(
 // Uses system timezone by default
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// Slack configuration
+// SLACK_BOT_TOKEN and SLACK_APP_TOKEN are read directly by SlackChannel
+// from .env via readEnvFile() to keep secrets off process.env.
+export const SLACK_ONLY =
+  (process.env.SLACK_ONLY || envConfig.SLACK_ONLY) === 'true';

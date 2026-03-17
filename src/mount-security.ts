@@ -229,10 +229,13 @@ export interface MountValidationResult {
 /**
  * Validate a single additional mount against the allowlist.
  * Returns validation result with reason.
+ *
+ * @param personalMode  true for owner context (isMain or rc-personal folder).
+ *                      Only external/proxy groups are subject to nonMainReadOnly.
  */
 export function validateMount(
   mount: AdditionalMount,
-  isMain: boolean,
+  personalMode: boolean,
 ): MountValidationResult {
   const allowlist = loadMountAllowlist();
 
@@ -294,14 +297,14 @@ export function validateMount(
   let effectiveReadonly = true; // Default to readonly
 
   if (requestedReadWrite) {
-    if (!isMain && allowlist.nonMainReadOnly) {
-      // Non-main groups forced to read-only
+    if (!personalMode && allowlist.nonMainReadOnly) {
+      // External/proxy groups (non-personal) forced to read-only
       effectiveReadonly = true;
       logger.info(
         {
           mount: mount.hostPath,
         },
-        'Mount forced to read-only for non-main group',
+        'Mount forced to read-only for external group',
       );
     } else if (!allowedRoot.allowReadWrite) {
       // Root doesn't allow read-write
@@ -336,7 +339,7 @@ export function validateMount(
 export function validateAdditionalMounts(
   mounts: AdditionalMount[],
   groupName: string,
-  isMain: boolean,
+  personalMode: boolean,
 ): Array<{
   hostPath: string;
   containerPath: string;
@@ -349,7 +352,7 @@ export function validateAdditionalMounts(
   }> = [];
 
   for (const mount of mounts) {
-    const result = validateMount(mount, isMain);
+    const result = validateMount(mount, personalMode);
 
     if (result.allowed) {
       validatedMounts.push({

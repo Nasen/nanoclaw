@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -16,6 +17,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -27,6 +29,7 @@ import {
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import { isPersonalFolder } from './rc-auto-register.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -39,6 +42,11 @@ export interface ContainerInput {
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
+  /** true = owner context (full MCP capabilities: Gmail, Jira, GitLab, etc.)
+   *  false = proxy context (nanoclaw IPC only — no personal data access)
+   *  Applies to: isMain group OR the rc-personal folder. All auto-registered
+   *  external contacts (rc-john-lin, rc-grp-*, etc.) are proxy context. */
+  personalMode?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
 }
@@ -86,31 +94,25 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
+  }
 
-    // Main also gets its group folder as the working directory
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  } else {
-    // Other groups only get their own folder
-    mounts.push({
-      hostPath: groupDir,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
+  // All groups get their own folder as the working directory
+  mounts.push({
+    hostPath: groupDir,
+    containerPath: '/workspace/group',
+    readonly: false,
+  });
 
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
+  // Global memory directory — all groups get read-only access.
+  // isMain groups need it too (e.g. rc-personal reads personal/ and org.db).
+  // Only directory mounts are supported, not file mounts.
+  const globalDir = path.join(GROUPS_DIR, 'global');
+  if (fs.existsSync(globalDir)) {
+    mounts.push({
+      hostPath: globalDir,
+      containerPath: '/workspace/global',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -175,36 +177,62 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-  }
-  mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
-  });
+  // Agent-runner source is NO LONGER MOUNTED at runtime.
+  // The container uses the pre-compiled /app/dist/ baked into the image at
+  // build time (root-owned, not writable by the node user). This closes the
+  // prompt-injection → source tampering → persistent backdoor attack chain.
+  // To update agent-runner code: edit container/agent-runner/src/ and run
+  // ./container/build.sh to rebuild the image.
 
-  // Additional mounts validated against external allowlist (tamper-proof from containers)
+  // Compute personalMode once — reused for Gmail, Outlook, and extra-mount validation.
+  // personalMode = isMain group OR explicitly listed personal folders (e.g. rc-nasen-you).
+  // RC auto-registered team chat groups (rc-grp-*) are proxy context only.
+  const personalMode = isMain || isPersonalFolder(group.folder, GROUPS_DIR);
+
+  // Gmail OAuth credentials — mounted read-write so MCP server can refresh tokens.
+  // Scoped to personalMode: external contacts must not be able to access OAuth tokens.
+  if (personalMode && fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))) {
+    mounts.push({
+      hostPath: path.join(os.homedir(), '.gmail-mcp'),
+      containerPath: '/home/node/.gmail-mcp',
+      readonly: false,
+    });
+  }
+
+  // Outlook OAuth token — read-write so the MCP server can refresh tokens automatically.
+  // personalMode only: external contacts must not access calendar data.
+  const outlookTokenFile = path.join(os.homedir(), '.outlook-mcp-tokens.json');
+  if (personalMode && fs.existsSync(outlookTokenFile)) {
+    mounts.push({
+      hostPath: outlookTokenFile,
+      containerPath: '/home/node/.outlook-mcp-tokens.json',
+      readonly: false,
+    });
+  }
+
+  // Figma in-house MCP server compiled JS (read-only)
+  const figmaMcpDir = path.join(
+    os.homedir(),
+    'Projects',
+    'figmainhousemcp',
+    'dist',
+  );
+  if (fs.existsSync(figmaMcpDir)) {
+    mounts.push({
+      hostPath: figmaMcpDir,
+      containerPath: '/workspace/figma-mcp',
+      readonly: true,
+    });
+  }
+
+  // Additional mounts validated against external allowlist (tamper-proof from containers).
+  // personalMode bypasses nonMainReadOnly so Nasen's own context can get write access
+  // for git operations etc.
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
       group.containerConfig.additionalMounts,
       group.name,
-      isMain,
+      personalMode,
     );
     mounts.push(...validatedMounts);
   }
@@ -215,6 +243,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  personalMode = false,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -240,6 +269,32 @@ function buildContainerArgs(
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
+
+  // personalMode containers get third-party API credentials via env vars.
+  // These are never passed to proxy-context (external contact) containers.
+  if (personalMode) {
+    const thirdPartyEnv = readEnvFile([
+      'JIRA_TOKEN',
+      'CONFLUENCE_READ_TOKEN',
+      'GITLAB_PERSONAL_ACCESS_TOKEN',
+      // RingCentral API — personalMode agents can call RC APIs directly
+      'RC_CLIENT_ID',
+      'RC_CLIENT_SECRET',
+      'RC_JWT',
+      'RC_SERVER',
+      // Outlook / Microsoft 365 calendar
+      'OUTLOOK_CLIENT_ID',
+      'OUTLOOK_CLIENT_SECRET',
+      'MS_TENANT_ID',
+      // Jenkins CI
+      'JENKINS_URL',
+      'JENKINS_USER',
+      'JENKINS_TOKEN',
+    ]);
+    for (const [key, value] of Object.entries(thirdPartyEnv)) {
+      if (value) args.push('-e', `${key}=${value}`);
+    }
+  }
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
@@ -278,7 +333,11 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(
+    mounts,
+    containerName,
+    input.personalMode,
+  );
 
   logger.debug(
     {
