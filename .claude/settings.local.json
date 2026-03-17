@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__filesystem__directory_tree",
+      "mcp__filesystem__list_directory",
+      "mcp__filesystem__read_text_file",
+      "mcp__filesystem__write_file",
+      "mcp__filesystem__edit_file"
+    ],
+    "additionalDirectories": [
+      "/Users/nasen.you/Projects/GH/openclaw-ringcentral"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "filesystem",
+    "memory"
+  ]
+}
