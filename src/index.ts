@@ -12,11 +12,11 @@ import {
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
+import { ChannelOpts } from './channels/registry.js';
 import {
-  getChannelFactory,
-  getRegisteredChannelNames,
-} from './channels/registry.js';
-import { RingCentralChannel } from './channels/ringcentral.js';
+  connectInstalledChannels,
+  connectRingCentralChannels,
+} from './channel-bootstrap.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -61,7 +61,6 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { readEnvFile } from './env.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -77,6 +76,37 @@ let autoAssistEnabled = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+function buildChannelOpts(): ChannelOpts {
+  return {
+    onMessage: (chatJid: string, msg: NewMessage) => {
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const cfg = loadSenderAllowlist();
+        if (
+          shouldDropMessage(chatJid, cfg) &&
+          !isSenderAllowed(chatJid, msg.sender, cfg)
+        ) {
+          if (cfg.logDenied) {
+            logger.debug(
+              { chatJid, sender: msg.sender },
+              'sender-allowlist: dropping message (drop mode)',
+            );
+          }
+          return;
+        }
+      }
+      storeMessage(msg);
+    },
+    onChatMetadata: (
+      chatJid: string,
+      timestamp: string,
+      name?: string,
+      channel?: string,
+      isGroup?: boolean,
+    ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    registeredGroups: () => registeredGroups,
+  };
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -499,139 +529,17 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Channel callbacks (shared by all channels)
-  const channelOpts = {
-    onMessage: (chatJid: string, msg: NewMessage) => {
-      // Sender allowlist drop mode: discard messages from denied senders before storing
-      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
-        const cfg = loadSenderAllowlist();
-        if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
-        ) {
-          if (cfg.logDenied) {
-            logger.debug(
-              { chatJid, sender: msg.sender },
-              'sender-allowlist: dropping message (drop mode)',
-            );
-          }
-          return;
-        }
-      }
-      storeMessage(msg);
-    },
-    onChatMetadata: (
-      chatJid: string,
-      timestamp: string,
-      name?: string,
-      channel?: string,
-      isGroup?: boolean,
-    ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+  const channelOpts = buildChannelOpts();
+  await connectInstalledChannels(channels, channelOpts);
+  await connectRingCentralChannels({
+    channelOpts,
+    channels,
     registeredGroups: () => registeredGroups,
-  };
-
-  // Create and connect registered channels (WhatsApp, Slack, etc. via barrel import).
-  for (const channelName of getRegisteredChannelNames()) {
-    const factory = getChannelFactory(channelName)!;
-    const channel = factory(channelOpts);
-    if (!channel) {
-      logger.warn(
-        { channel: channelName },
-        'Channel installed but credentials missing — skipping. Check .env or re-run the channel skill.',
-      );
-      continue;
-    }
-    channels.push(channel);
-    await channel.connect();
-  }
-
-  // RingCentral channels (dual auth — not using registry due to two simultaneous instances).
-  const rcEnv = readEnvFile([
-    'RC_CLIENT_ID',
-    'RC_CLIENT_SECRET',
-    'RC_JWT',
-    'RC_SERVER',
-    'RC_BOT_CLIENT_ID',
-    'RC_BOT_CLIENT_SECRET',
-    'RC_BOT_TOKEN',
-  ]);
-
-  // REST API App (user account / JWT auth) → jid prefix 'rc:'
-  if (rcEnv.RC_CLIENT_ID && rcEnv.RC_CLIENT_SECRET && rcEnv.RC_JWT) {
-    const rcChannel = new RingCentralChannel({
-      ...channelOpts,
-      name: 'rc',
-      jidPrefix: 'rc:',
-      creds: {
-        clientId: rcEnv.RC_CLIENT_ID,
-        clientSecret: rcEnv.RC_CLIENT_SECRET,
-        jwt: rcEnv.RC_JWT,
-        server: rcEnv.RC_SERVER,
-      },
-      onOwnerCommand: async (cmd) => {
-        if (cmd.action === 'set_auto_assist') {
-          setAutoAssist(cmd.value);
-          // Send confirmation to rc-personal (the isMain RC DM group)
-          const rcPersonalEntry = Object.entries(registeredGroups).find(
-            ([, g]) => g.folder === 'rc-personal',
-          );
-          if (rcPersonalEntry) {
-            const [rcPersonalJid] = rcPersonalEntry;
-            await rcChannel.sendMessage(
-              rcPersonalJid,
-              cmd.value
-                ? 'Auto-assistant mode *enabled*. I will respond to DMs on your behalf.'
-                : 'Auto-assistant mode *disabled*. DMs will be delivered to you directly.',
-            );
-          }
-        }
-      },
-    });
-    channels.push(rcChannel);
-    try {
-      await rcChannel.connect();
-    } catch (err) {
-      logger.error(
-        { err },
-        'RingCentral (REST API) channel failed to connect — service continues without it',
-      );
-      channels.splice(channels.indexOf(rcChannel), 1);
-    }
-  }
-
-  // Bot Add-in (bot identity / token auth) → jid prefix 'rcb:'
-  if (
-    rcEnv.RC_BOT_CLIENT_ID &&
-    rcEnv.RC_BOT_CLIENT_SECRET &&
-    rcEnv.RC_BOT_TOKEN
-  ) {
-    const rcBotChannel = new RingCentralChannel({
-      ...channelOpts,
-      name: 'rc-bot',
-      jidPrefix: 'rcb:',
-      // Only the bot channel auto-registers unknown contacts
-      autoRegister: true,
-      onRegisterGroup: (jid, group) => {
-        registeredGroups[jid] = group;
-      },
-      creds: {
-        clientId: rcEnv.RC_BOT_CLIENT_ID,
-        clientSecret: rcEnv.RC_BOT_CLIENT_SECRET,
-        botToken: rcEnv.RC_BOT_TOKEN,
-        server: rcEnv.RC_SERVER,
-      },
-    });
-    channels.push(rcBotChannel);
-    try {
-      await rcBotChannel.connect();
-    } catch (err) {
-      logger.error(
-        { err },
-        'RingCentral (Bot Add-in) channel failed to connect — service continues without it',
-      );
-      channels.splice(channels.indexOf(rcBotChannel), 1);
-    }
-  }
+    setAutoAssist,
+    onRegisterGroup: (jid, group) => {
+      registeredGroups[jid] = group;
+    },
+  });
 
   if (channels.length === 0) {
     logger.fatal('No channels connected');
