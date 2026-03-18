@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { getAgentBackendConfig } from './agent-backend.js';
 import {
   CONTAINER_HOST_GATEWAY,
   hostGatewayArgs,
@@ -14,7 +15,6 @@ import {
   GROUPS_DIR,
   TIMEZONE,
 } from './config.js';
-import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { validateAdditionalMounts } from './mount-security.js';
@@ -36,13 +36,10 @@ const SESSION_SETTINGS = {
 };
 
 function ensureGroupSessionsDir(group: RegisteredGroup): string {
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
+  const groupSessionsRoot = path.join(DATA_DIR, 'sessions', group.folder);
+  const groupSessionsDir = path.join(groupSessionsRoot, '.claude');
   fs.mkdirSync(groupSessionsDir, { recursive: true });
+  fs.mkdirSync(path.join(groupSessionsRoot, '.nanoclaw'), { recursive: true });
 
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
   if (!fs.existsSync(settingsFile)) {
@@ -75,14 +72,8 @@ function ensureGroupIpcDir(group: RegisteredGroup): string {
   return groupIpcDir;
 }
 
-function addPersonalMounts(
-  mounts: VolumeMount[],
-  personalMode: boolean,
-): void {
-  if (
-    personalMode &&
-    fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))
-  ) {
+function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
+  if (personalMode && fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))) {
     mounts.push({
       hostPath: path.join(os.homedir(), '.gmail-mcp'),
       containerPath: '/home/node/.gmail-mcp',
@@ -161,6 +152,11 @@ export function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+  mounts.push({
+    hostPath: path.join(path.dirname(groupSessionsDir), '.nanoclaw'),
+    containerPath: '/home/node/.nanoclaw',
+    readonly: false,
+  });
 
   const groupIpcDir = ensureGroupIpcDir(group);
   mounts.push({
@@ -191,18 +187,18 @@ export function buildContainerArgs(
   personalMode = false,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const backendConfig = getAgentBackendConfig();
 
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `NANOCLAW_AGENT_BACKEND=${backendConfig.backend}`);
+  if (backendConfig.model) {
+    args.push('-e', `AGENT_MODEL=${backendConfig.model}`);
+  }
   args.push(
     '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    `${backendConfig.containerBaseUrlEnvVar}=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
-
-  if (detectAuthMode() === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
-  }
+  args.push('-e', `${backendConfig.containerCredentialEnvVar}=placeholder`);
 
   args.push(...hostGatewayArgs());
 
