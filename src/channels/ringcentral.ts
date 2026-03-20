@@ -50,6 +50,27 @@ interface RCCredentials {
   server: string;
 }
 
+export interface RcChatSummary {
+  jid: string;
+  chatId: string;
+  name: string;
+}
+
+export interface RcChatMessage {
+  id: string;
+  text: string;
+  creatorId: string;
+  creatorName: string;
+  createdAt: string;
+}
+
+export interface RcChatTranscript {
+  jid: string;
+  chatId: string;
+  name: string;
+  messages: RcChatMessage[];
+}
+
 // ─── SDK singleton cache ─────────────────────────────────────────────────────
 
 const sdkCache = new Map<
@@ -212,6 +233,48 @@ async function listChats(
       records?: Array<{ id?: string; name?: string }>;
     };
     return body?.records ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function getChat(
+  platform: RCPlatform,
+  chatId: string,
+): Promise<{ id?: string; name?: string } | null> {
+  try {
+    const resp = await platform.get(`${TM_BASE}/chats/${chatId}`);
+    return (await resp.json()) as { id?: string; name?: string };
+  } catch {
+    return null;
+  }
+}
+
+async function listPosts(
+  platform: RCPlatform,
+  chatId: string,
+  limit = 20,
+): Promise<
+  Array<{
+    id?: string;
+    text?: string;
+    creatorId?: string;
+    creationTime?: string;
+  }>
+> {
+  try {
+    const resp = await platform.get(`${TM_BASE}/chats/${chatId}/posts`, {
+      recordCount: String(limit),
+    });
+    const body = (await resp.json()) as {
+      records?: Array<{
+        id?: string;
+        text?: string;
+        creatorId?: string;
+        creationTime?: string;
+      }>;
+    };
+    return body.records ?? [];
   } catch {
     return [];
   }
@@ -453,6 +516,103 @@ export class RingCentralChannel implements Channel {
         'RC send failed, queued',
       );
     }
+  }
+
+  jidForChatId(chatId: string): string {
+    return `${this.jidPrefix}${chatId}`;
+  }
+
+  normalizeChatId(chatRef: string): string {
+    if (chatRef.startsWith('rc:')) return chatRef.slice(3);
+    if (chatRef.startsWith('rcb:')) return chatRef.slice(4);
+    return chatRef;
+  }
+
+  async listChatsForAgent(
+    query?: string,
+    limit = 50,
+  ): Promise<RcChatSummary[]> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const cappedLimit = Math.min(Math.max(limit, 1), 250);
+    const chats = await listChats(this.platform, Math.min(cappedLimit * 3, 250));
+    const normalizedQuery = query?.trim().toLowerCase();
+
+    return chats
+      .filter((chat) => chat.id && chat.name)
+      .map((chat) => ({
+        jid: this.jidForChatId(chat.id!),
+        chatId: chat.id!,
+        name: chat.name!,
+      }))
+      .filter((chat) => {
+        if (!normalizedQuery) return true;
+        return (
+          chat.chatId.toLowerCase().includes(normalizedQuery) ||
+          chat.name.toLowerCase().includes(normalizedQuery)
+        );
+      })
+      .slice(0, cappedLimit);
+  }
+
+  async readMessagesForAgent(
+    chatRef: string,
+    limit = 20,
+  ): Promise<RcChatTranscript> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const chatId = this.normalizeChatId(chatRef);
+    const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    const chat = await getChat(this.platform, chatId);
+    const posts = await listPosts(this.platform, chatId, cappedLimit);
+
+    const messages = await Promise.all(
+      posts.map(async (post) => {
+        const creatorId = post.creatorId ?? '';
+        const creatorName =
+          creatorId && creatorId === this.botExtId
+            ? ASSISTANT_NAME
+            : ((creatorId ? await this.resolveUser(creatorId) : undefined) ??
+              creatorId ??
+              'unknown');
+
+        return {
+          id: post.id ?? '',
+          text: post.text ?? '',
+          creatorId,
+          creatorName,
+          createdAt: post.creationTime
+            ? new Date(post.creationTime).toISOString()
+            : new Date().toISOString(),
+        };
+      }),
+    );
+
+    return {
+      jid: this.jidForChatId(chatId),
+      chatId,
+      name: chat?.name ?? this.jidForChatId(chatId),
+      messages: messages.reverse(),
+    };
+  }
+
+  async sendMessageForAgent(
+    chatRef: string,
+    text: string,
+  ): Promise<{ jid: string; chatId: string; postId?: string }> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const chatId = this.normalizeChatId(chatRef);
+    const postId = await sendPost(this.platform, chatId, text);
+    if (postId) this.trackSent(postId);
+
+    logger.info({ jid: this.jidForChatId(chatId), length: text.length }, 'RC SDK message sent');
+
+    return {
+      jid: this.jidForChatId(chatId),
+      chatId,
+      postId,
+    };
   }
 
   // ─── Inbound ─────────────────────────────────────────────────────────────────

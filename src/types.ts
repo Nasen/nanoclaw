@@ -77,6 +77,8 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+export type RcDeliveryMode = 'auto' | 'personal' | 'bot';
+
 // --- Channel abstraction ---
 
 export interface Channel {

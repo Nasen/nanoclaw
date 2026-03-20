@@ -1,8 +1,4 @@
-import {
-  ASSISTANT_NAME,
-  POLL_INTERVAL,
-  TIMEZONE,
-} from './config.js';
+import { ASSISTANT_NAME, POLL_INTERVAL, TIMEZONE } from './config.js';
 import { getMessagesSince, getNewMessages } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { groupNeedsTrigger, hasAllowedTrigger } from './message-gating.js';
@@ -22,7 +18,9 @@ interface MessageLoopDeps {
   saveState: () => void;
 }
 
-function groupMessagesByChat(messages: NewMessage[]): Map<string, NewMessage[]> {
+function groupMessagesByChat(
+  messages: NewMessage[],
+): Map<string, NewMessage[]> {
   const grouped = new Map<string, NewMessage[]>();
   for (const message of messages) {
     const existing = grouped.get(message.chat_jid);
@@ -61,10 +59,9 @@ function pipeOrEnqueueMessages(
       messagesToSend[messagesToSend.length - 1].timestamp,
     );
     deps.saveState();
-    deps.channels.find((channel) => channel.ownsJid(chatJid))?.setTyping?.(
-      chatJid,
-      true,
-    );
+    deps.channels
+      .find((channel) => channel.ownsJid(chatJid))
+      ?.setTyping?.(chatJid, true);
     return;
   }
 

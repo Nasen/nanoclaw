@@ -141,7 +141,10 @@ function createCloseSchedulerTaskContainer(
     scheduleClose: () => {
       if (closeTimer) return;
       closeTimer = setTimeout(() => {
-        logger.debug({ taskId: task.id }, 'Closing task container after result');
+        logger.debug(
+          { taskId: task.id },
+          'Closing task container after result',
+        );
         queue.closeStdin(task.chat_jid);
       }, TASK_CLOSE_DELAY_MS);
     },

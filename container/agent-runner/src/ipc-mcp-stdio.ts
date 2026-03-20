@@ -14,6 +14,7 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -34,6 +35,39 @@ function writeIpcFile(dir: string, data: object): string {
   return filename;
 }
 
+async function waitForResponse(
+  requestId: string,
+  timeoutMs = 20000,
+): Promise<Record<string, unknown>> {
+  const responsePath = path.join(RESPONSES_DIR, `${requestId}.json`);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (fs.existsSync(responsePath)) {
+      const raw = fs.readFileSync(responsePath, 'utf-8');
+      fs.unlinkSync(responsePath);
+      return JSON.parse(raw) as Record<string, unknown>;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  throw new Error(`Timed out waiting for IPC response ${requestId}`);
+}
+
+async function requestTask(
+  type: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 20000,
+): Promise<Record<string, unknown>> {
+  const requestId = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  writeIpcFile(TASKS_DIR, {
+    type,
+    requestId,
+    ...payload,
+  });
+  return waitForResponse(requestId, timeoutMs);
+}
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
@@ -41,10 +75,16 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. In personal-mode chats, this sends through the user's connected integration on their behalf in the current chat. You can call this multiple times.",
   {
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    delivery_mode: z
+      .enum(['auto', 'personal', 'bot'])
+      .optional()
+      .describe(
+        'Routing preference for the current chat. For RingCentral, "personal" uses Nasen\'s personal RC app/credentials, "bot" uses the RC bot app, and "auto" keeps the default route.',
+      ),
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -52,6 +92,7 @@ server.tool(
       chatJid,
       text: args.text,
       sender: args.sender || undefined,
+      deliveryMode: args.delivery_mode || 'auto',
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -185,6 +226,105 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  },
+);
+
+server.tool(
+  'list_rc_chats',
+  'List RingCentral team or DM chats accessible through the integrated RC SDK. Use mode="personal" for Nasen personal credentials and mode="bot" for the RC bot app.',
+  {
+    query: z.string().optional().describe('Optional text filter for chat name or chat ID.'),
+    limit: z.number().int().min(1).max(100).default(20).describe('Maximum chats to return.'),
+    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_list_chats', {
+        query: args.query,
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [{ type: 'text' as const, text: String(response.error || 'Failed to list RC chats.') }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(response.chats ?? [], null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'read_rc_messages',
+  'Read recent messages from a RingCentral team or DM chat using the integrated RC SDK.',
+  {
+    chat_id: z.string().describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+    limit: z.number().int().min(1).max(100).default(20).describe('Maximum messages to return.'),
+    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_read_messages', {
+        chatId: args.chat_id,
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [{ type: 'text' as const, text: String(response.error || 'Failed to read RC messages.') }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(response.transcript ?? {}, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'send_rc_message',
+  'Send a RingCentral team or DM message through the integrated RC SDK.',
+  {
+    chat_id: z.string().describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+    text: z.string().describe('Message text to send.'),
+    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_send_message', {
+        chatId: args.chat_id,
+        text: args.text,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [{ type: 'text' as const, text: String(response.error || 'Failed to send RC message.') }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(response.result ?? {}, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        isError: true,
       };
     }
   },

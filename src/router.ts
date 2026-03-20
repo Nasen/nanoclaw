@@ -1,4 +1,4 @@
-import { Channel, NewMessage } from './types.js';
+import { Channel, NewMessage, RcDeliveryMode } from './types.js';
 import { formatLocalTime } from './timezone.js';
 
 export function escapeXml(s: string): string {
@@ -39,9 +39,9 @@ export function routeOutbound(
   jid: string,
   text: string,
 ): Promise<void> {
-  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
-  if (!channel) throw new Error(`No channel for JID: ${jid}`);
-  return channel.sendMessage(jid, text);
+  const target = resolveOutboundTarget(channels, jid);
+  if (!target) throw new Error(`No channel for JID: ${jid}`);
+  return target.channel.sendMessage(target.jid, text);
 }
 
 export function findChannel(
@@ -49,4 +49,44 @@ export function findChannel(
   jid: string,
 ): Channel | undefined {
   return channels.find((c) => c.ownsJid(jid));
+}
+
+function isRingCentralJid(jid: string): boolean {
+  return jid.startsWith('rc:') || jid.startsWith('rcb:');
+}
+
+function swapRingCentralPrefix(
+  jid: string,
+  targetPrefix: 'rc:' | 'rcb:',
+): string {
+  if (jid.startsWith('rc:')) return `${targetPrefix}${jid.slice(3)}`;
+  if (jid.startsWith('rcb:')) return `${targetPrefix}${jid.slice(4)}`;
+  return jid;
+}
+
+export function resolveOutboundTarget(
+  channels: Channel[],
+  jid: string,
+  rcDeliveryMode: RcDeliveryMode = 'auto',
+): { channel: Channel; jid: string } | null {
+  if (isRingCentralJid(jid)) {
+    const preferredPrefix =
+      rcDeliveryMode === 'personal'
+        ? 'rc:'
+        : rcDeliveryMode === 'bot'
+          ? 'rcb:'
+          : null;
+
+    if (preferredPrefix) {
+      const preferredJid = swapRingCentralPrefix(jid, preferredPrefix);
+      const preferredChannel = findChannel(channels, preferredJid);
+      if (preferredChannel) {
+        return { channel: preferredChannel, jid: preferredJid };
+      }
+    }
+  }
+
+  const channel = findChannel(channels, jid);
+  if (!channel) return null;
+  return { channel, jid };
 }

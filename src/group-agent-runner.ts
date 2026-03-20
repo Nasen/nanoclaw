@@ -1,8 +1,14 @@
-import { ContainerOutput, runContainerAgent, writeGroupsSnapshot, writeTasksSnapshot } from './container-runner.js';
+import {
+  ContainerOutput,
+  runContainerAgent,
+  writeGroupsSnapshot,
+  writeTasksSnapshot,
+} from './container-runner.js';
 import { getAllTasks } from './db.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import { resolveOutboundTarget } from './router.js';
 import { RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
@@ -107,6 +113,22 @@ interface ProcessGroupMessagesDeps extends RunGroupAgentDeps {
   autoAssistEnabled: () => boolean;
 }
 
+function shouldUsePersonalRcDelivery(
+  chatJid: string,
+  messages: Array<{ content: string; is_from_me?: boolean }>,
+): boolean {
+  if (!chatJid.startsWith('rcb:')) return false;
+
+  const latestInbound = [...messages]
+    .reverse()
+    .find((message) => !message.is_from_me);
+  if (!latestInbound) return false;
+
+  return /\b(on my behalf|on behalf of me|as me|reply as me|send as me|speak as me|use my personal (?:rc|ringcentral|account|credentials)|use my credentials|using my credentials|use personal credentials|from my account|via my account|via my personal rc)\b/i.test(
+    latestInbound.content,
+  );
+}
+
 export async function processGroupMessages(
   chatJid: string,
   deps: ProcessGroupMessagesDeps,
@@ -116,13 +138,11 @@ export async function processGroupMessages(
 
   const { findChannel, formatMessages } = await import('./router.js');
   const { getMessagesSince } = await import('./db.js');
-  const {
-    groupNeedsTrigger,
-    hasAllowedTrigger,
-    isPersonalRcDm,
-  } = await import('./message-gating.js');
+  const { groupNeedsTrigger, hasAllowedTrigger, isPersonalRcDm } =
+    await import('./message-gating.js');
   const { loadSenderAllowlist } = await import('./sender-allowlist.js');
-  const { ASSISTANT_NAME, IDLE_TIMEOUT, TIMEZONE } = await import('./config.js');
+  const { ASSISTANT_NAME, IDLE_TIMEOUT, TIMEZONE } =
+    await import('./config.js');
 
   const channel = findChannel(deps.channels, chatJid);
   if (!channel) {
@@ -156,7 +176,18 @@ export async function processGroupMessages(
       ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
       : '';
 
-  const prompt = autoAssistPrefix + formatMessages(missedMessages, TIMEZONE);
+  const usePersonalRcDelivery =
+    group.folder === 'rc-personal' ||
+    shouldUsePersonalRcDelivery(chatJid, missedMessages);
+  const rcRoutingPrefix =
+    chatJid.startsWith('rc:') || chatJid.startsWith('rcb:')
+      ? usePersonalRcDelivery
+        ? '[RingCentral routing: The latest user request asks you to act on Nasen\'s behalf. For outbound actions in this chat, prefer send_message with delivery_mode="personal".]\n\n'
+        : '[RingCentral routing: send_message supports delivery_mode="personal" for Nasen\'s personal RC app and delivery_mode="bot" for the bot app. Use personal when the user explicitly asks you to act as Nasen or use his personal RC account.]\n\n'
+      : '';
+
+  const prompt =
+    autoAssistPrefix + rcRoutingPrefix + formatMessages(missedMessages, TIMEZONE);
   const previousCursor = deps.getLastAgentTimestamp(chatJid);
   deps.setLastAgentTimestamp(
     chatJid,
@@ -197,9 +228,20 @@ export async function processGroupMessages(
             ? result.result
             : JSON.stringify(result.result);
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
         if (text) {
-          await channel.sendMessage(chatJid, text);
+          const target = resolveOutboundTarget(
+            deps.channels,
+            chatJid,
+            usePersonalRcDelivery ? 'personal' : 'auto',
+          );
+          if (!target) {
+            throw new Error(`No channel for JID: ${chatJid}`);
+          }
+          await target.channel.sendMessage(target.jid, text);
           outputSentToUser = true;
         }
         resetIdleTimer();

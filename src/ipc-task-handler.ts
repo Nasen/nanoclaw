@@ -1,10 +1,13 @@
+import fs from 'fs';
+import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, TIMEZONE } from './config.js';
+import { GROUPS_DIR, TIMEZONE } from './config.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
-import { isValidGroupFolder } from './group-folder.js';
+import { isPersonalFolder } from './rc-auto-register.js';
+import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RcDeliveryMode, RegisteredGroup } from './types.js';
 
 export interface TaskIpcData {
   type: string;
@@ -22,6 +25,12 @@ export interface TaskIpcData {
   trigger?: string;
   requiresTrigger?: boolean;
   containerConfig?: RegisteredGroup['containerConfig'];
+  requestId?: string;
+  mode?: RcDeliveryMode;
+  query?: string;
+  limit?: number;
+  text?: string;
+  chatId?: string;
 }
 
 export interface TaskIpcDeps {
@@ -35,6 +44,21 @@ export interface TaskIpcDeps {
     availableGroups: import('./container-runner.js').AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  rcListChats: (
+    mode: RcDeliveryMode,
+    query?: string,
+    limit?: number,
+  ) => Promise<import('./channels/ringcentral.js').RcChatSummary[]>;
+  rcReadMessages: (
+    chatRef: string,
+    mode: RcDeliveryMode,
+    limit?: number,
+  ) => Promise<import('./channels/ringcentral.js').RcChatTranscript>;
+  rcSendMessage: (
+    chatRef: string,
+    text: string,
+    mode: RcDeliveryMode,
+  ) => Promise<{ jid: string; chatId: string; postId?: string }>;
 }
 
 function computeNextRun(
@@ -42,7 +66,9 @@ function computeNextRun(
   scheduleValue: string,
 ): string | null {
   if (scheduleType === 'cron') {
-    const interval = CronExpressionParser.parse(scheduleValue, { tz: TIMEZONE });
+    const interval = CronExpressionParser.parse(scheduleValue, {
+      tz: TIMEZONE,
+    });
     return interval.next().toISOString();
   }
 
@@ -67,6 +93,32 @@ function isTaskAuthorized(
   taskGroupFolder: string,
 ): boolean {
   return isMain || taskGroupFolder === sourceGroup;
+}
+
+function hasRcAccess(sourceGroup: string, isMain: boolean): boolean {
+  return isMain || isPersonalFolder(sourceGroup, GROUPS_DIR);
+}
+
+function resolveRcMode(
+  sourceGroup: string,
+  requested?: RcDeliveryMode,
+): RcDeliveryMode {
+  if (requested && requested !== 'auto') return requested;
+  return sourceGroup === 'rc-personal' ? 'personal' : 'bot';
+}
+
+function writeTaskResponse(
+  sourceGroup: string,
+  requestId: string | undefined,
+  payload: object,
+): void {
+  if (!requestId) return;
+  const responsesDir = path.join(resolveGroupIpcPath(sourceGroup), 'responses');
+  fs.mkdirSync(responsesDir, { recursive: true });
+  const filePath = path.join(responsesDir, `${requestId}.json`);
+  const tempPath = `${filePath}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2));
+  fs.renameSync(tempPath, filePath);
 }
 
 export async function processTaskIpc(
@@ -159,7 +211,10 @@ export async function processTaskIpc(
 
       if (data.type === 'pause_task') {
         updateTask(data.taskId, { status: 'paused' });
-        logger.info({ taskId: data.taskId, sourceGroup }, 'Task paused via IPC');
+        logger.info(
+          { taskId: data.taskId, sourceGroup },
+          'Task paused via IPC',
+        );
       } else if (data.type === 'resume_task') {
         updateTask(data.taskId, { status: 'active' });
         logger.info(
@@ -180,7 +235,10 @@ export async function processTaskIpc(
       if (!data.taskId) break;
       const task = getTaskById(data.taskId);
       if (!task) {
-        logger.warn({ taskId: data.taskId, sourceGroup }, 'Task not found for update');
+        logger.warn(
+          { taskId: data.taskId, sourceGroup },
+          'Task not found for update',
+        );
         break;
       }
       if (!isTaskAuthorized(isMain, sourceGroup, task.group_folder)) {
@@ -194,7 +252,10 @@ export async function processTaskIpc(
       const updates: Parameters<typeof updateTask>[1] = {};
       if (data.prompt !== undefined) updates.prompt = data.prompt;
       if (data.schedule_type !== undefined) {
-        updates.schedule_type = data.schedule_type as 'cron' | 'interval' | 'once';
+        updates.schedule_type = data.schedule_type as
+          | 'cron'
+          | 'interval'
+          | 'once';
       }
       if (data.schedule_value !== undefined) {
         updates.schedule_value = data.schedule_value;
@@ -273,6 +334,95 @@ export async function processTaskIpc(
         requiresTrigger: data.requiresTrigger,
       });
       break;
+
+    case 'rc_list_chats': {
+      const mode = resolveRcMode(sourceGroup, data.mode);
+      if (!hasRcAccess(sourceGroup, isMain)) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'RC tools are only available from main or personal groups.',
+        });
+        break;
+      }
+      try {
+        const chats = await deps.rcListChats(mode, data.query, data.limit);
+        writeTaskResponse(sourceGroup, data.requestId, { ok: true, chats });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'rc_read_messages': {
+      const mode = resolveRcMode(sourceGroup, data.mode);
+      const chatRef = data.chatId || data.chatJid;
+      if (!hasRcAccess(sourceGroup, isMain)) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'RC tools are only available from main or personal groups.',
+        });
+        break;
+      }
+      if (!chatRef) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'chatId is required.',
+        });
+        break;
+      }
+      try {
+        const transcript = await deps.rcReadMessages(
+          chatRef,
+          mode,
+          data.limit,
+        );
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          transcript,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'rc_send_message': {
+      const mode = resolveRcMode(sourceGroup, data.mode);
+      const chatRef = data.chatId || data.chatJid;
+      if (!hasRcAccess(sourceGroup, isMain)) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'RC tools are only available from main or personal groups.',
+        });
+        break;
+      }
+      if (!chatRef || !data.text) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'chatId and text are required.',
+        });
+        break;
+      }
+      try {
+        const result = await deps.rcSendMessage(chatRef, data.text, mode);
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          result,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }

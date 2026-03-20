@@ -17,9 +17,7 @@ import {
   connectInstalledChannels,
   connectRingCentralChannels,
 } from './channel-bootstrap.js';
-import {
-  ContainerOutput,
-} from './container-runner.js';
+import { ContainerOutput } from './container-runner.js';
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,

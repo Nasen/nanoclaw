@@ -14,10 +14,7 @@ import {
 import { buildContainerArgs, buildVolumeMounts } from './container-config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import {
-  CONTAINER_RUNTIME_BIN,
-  stopContainer,
-} from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, stopContainer } from './container-runtime.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)

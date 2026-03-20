@@ -2,10 +2,23 @@ import fs from 'fs';
 import path from 'path';
 
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RcDeliveryMode, RegisteredGroup } from './types.js';
 
 interface MessageIpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    rcDeliveryMode?: RcDeliveryMode,
+  ) => Promise<void>;
+}
+
+function forcePersonalRcJidForPersonalGroup(
+  sourceGroup: string,
+  chatJid: string,
+): string {
+  if (sourceGroup !== 'rc-personal') return chatJid;
+  if (!chatJid.startsWith('rcb:')) return chatJid;
+  return `rc:${chatJid.slice(4)}`;
 }
 
 export async function processMessageFiles(
@@ -29,14 +42,32 @@ export async function processMessageFiles(
         type?: string;
         chatJid?: string;
         text?: string;
+        deliveryMode?: RcDeliveryMode;
       };
 
       if (data.type === 'message' && data.chatJid && data.text) {
         const targetGroup = registeredGroups[data.chatJid];
         if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-          await deps.sendMessage(data.chatJid, data.text);
+          const effectiveChatJid = forcePersonalRcJidForPersonalGroup(
+            sourceGroup,
+            data.chatJid,
+          );
+          const effectiveDeliveryMode =
+            sourceGroup === 'rc-personal' &&
+            (data.deliveryMode === undefined || data.deliveryMode === 'auto')
+              ? 'personal'
+              : (data.deliveryMode || 'auto');
+          await deps.sendMessage(
+            effectiveChatJid,
+            data.text,
+            effectiveDeliveryMode,
+          );
           logger.info(
-            { chatJid: data.chatJid, sourceGroup },
+            {
+              chatJid: effectiveChatJid,
+              sourceGroup,
+              deliveryMode: effectiveDeliveryMode,
+            },
             'IPC message sent',
           );
         } else {

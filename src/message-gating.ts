@@ -10,7 +10,9 @@ export function groupNeedsTrigger(group: RegisteredGroup): boolean {
 export function hasAllowedTrigger(
   chatJid: string,
   messages: NewMessage[],
-  allowlistCfg: ReturnType<typeof import('./sender-allowlist.js').loadSenderAllowlist>,
+  allowlistCfg: ReturnType<
+    typeof import('./sender-allowlist.js').loadSenderAllowlist
+  >,
 ): boolean {
   return messages.some(
     (message) =>

@@ -6,12 +6,20 @@ import { AvailableGroup } from './container-runner.js';
 import { processMessageFiles } from './ipc-message-handler.js';
 import { processTaskIpc, TaskIpcData } from './ipc-task-handler.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { RcDeliveryMode, RegisteredGroup } from './types.js';
+import {
+  RcChatSummary,
+  RcChatTranscript,
+} from './channels/ringcentral.js';
 
 export { processTaskIpc } from './ipc-task-handler.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (
+    jid: string,
+    text: string,
+    rcDeliveryMode?: RcDeliveryMode,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -22,6 +30,21 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  rcListChats: (
+    mode: RcDeliveryMode,
+    query?: string,
+    limit?: number,
+  ) => Promise<RcChatSummary[]>;
+  rcReadMessages: (
+    chatRef: string,
+    mode: RcDeliveryMode,
+    limit?: number,
+  ) => Promise<RcChatTranscript>;
+  rcSendMessage: (
+    chatRef: string,
+    text: string,
+    mode: RcDeliveryMode,
+  ) => Promise<{ jid: string; chatId: string; postId?: string }>;
 }
 
 let ipcWatcherRunning = false;
@@ -88,7 +111,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as TaskIpcData;
+              const data = JSON.parse(
+                fs.readFileSync(filePath, 'utf-8'),
+              ) as TaskIpcData;
               await processTaskIpc(data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {

@@ -65,9 +65,9 @@ export function stopContainer(name: string): string {
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} info`, {
+    execSync(`${CONTAINER_RUNTIME_BIN} info --format '{{.ServerVersion}}'`, {
       stdio: 'pipe',
-      timeout: 10000,
+      timeout: 30000,
     });
     logger.debug('Container runtime already running');
   } catch (err) {

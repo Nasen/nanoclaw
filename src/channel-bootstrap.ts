@@ -1,4 +1,7 @@
-import { getChannelFactory, getRegisteredChannelNames } from './channels/registry.js';
+import {
+  getChannelFactory,
+  getRegisteredChannelNames,
+} from './channels/registry.js';
 import { RingCentralChannel } from './channels/ringcentral.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';

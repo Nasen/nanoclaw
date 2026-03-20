@@ -62,6 +62,14 @@ beforeEach(() => {
     syncGroups: async () => {},
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
+    rcListChats: async () => [],
+    rcReadMessages: async () => ({
+      jid: 'rc:1',
+      chatId: '1',
+      name: 'Test',
+      messages: [],
+    }),
+    rcSendMessage: async () => ({ jid: 'rc:1', chatId: '1' }),
   };
 });
 

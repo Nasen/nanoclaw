@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import { _initTestDatabase, getAllChats, storeChatMetadata } from './db.js';
 import { getAvailableGroups, _setRegisteredGroups } from './index.js';
+import { resolveOutboundTarget } from './router.js';
+import { Channel } from './types.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -31,6 +33,52 @@ describe('JID ownership patterns', () => {
   it('Slack DM JID: starts with slack:D', () => {
     const jid = 'slack:D0123456789';
     expect(jid.startsWith('slack:')).toBe(true);
+  });
+});
+
+describe('resolveOutboundTarget', () => {
+  function makeChannel(prefix: string, name: string): Channel {
+    return {
+      name,
+      connect: async () => {},
+      sendMessage: async () => {},
+      isConnected: () => true,
+      ownsJid: (jid: string) => jid.startsWith(prefix),
+      disconnect: async () => {},
+    };
+  }
+
+  it('keeps the default RC route in auto mode', () => {
+    const target = resolveOutboundTarget(
+      [makeChannel('rc:', 'rc'), makeChannel('rcb:', 'rc-bot')],
+      'rcb:12345',
+      'auto',
+    );
+
+    expect(target?.jid).toBe('rcb:12345');
+    expect(target?.channel.name).toBe('rc-bot');
+  });
+
+  it('switches RC bot chat to personal route when requested', () => {
+    const target = resolveOutboundTarget(
+      [makeChannel('rc:', 'rc'), makeChannel('rcb:', 'rc-bot')],
+      'rcb:12345',
+      'personal',
+    );
+
+    expect(target?.jid).toBe('rc:12345');
+    expect(target?.channel.name).toBe('rc');
+  });
+
+  it('switches RC personal chat to bot route when requested', () => {
+    const target = resolveOutboundTarget(
+      [makeChannel('rc:', 'rc'), makeChannel('rcb:', 'rc-bot')],
+      'rc:12345',
+      'bot',
+    );
+
+    expect(target?.jid).toBe('rcb:12345');
+    expect(target?.channel.name).toBe('rc-bot');
   });
 });
 
