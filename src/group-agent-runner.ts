@@ -187,7 +187,9 @@ export async function processGroupMessages(
       : '';
 
   const prompt =
-    autoAssistPrefix + rcRoutingPrefix + formatMessages(missedMessages, TIMEZONE);
+    autoAssistPrefix +
+    rcRoutingPrefix +
+    formatMessages(missedMessages, TIMEZONE);
   const previousCursor = deps.getLastAgentTimestamp(chatJid);
   deps.setLastAgentTimestamp(
     chatJid,

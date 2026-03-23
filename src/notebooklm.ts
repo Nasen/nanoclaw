@@ -80,7 +80,8 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.au': 'audio/basic',
   '.avi': 'video/x-msvideo',
   '.cda': 'application/x-cdf',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.jpeg': 'image/jpeg',
   '.jpg': 'image/jpg',
   '.m4a': 'audio/m4a',
@@ -94,7 +95,8 @@ const FILE_CONTENT_TYPES: Record<string, string> = {
   '.opus': 'audio/ogg',
   '.pdf': 'application/pdf',
   '.png': 'image/png',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.pptx':
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   '.ra': 'audio/vnd.rn-realaudio',
   '.ram': 'audio/vnd.rn-realaudio',
   '.snd': 'audio/basic',
@@ -146,14 +148,10 @@ export function getNotebookLmConfig(): NotebookLmConfig {
 
 export function getNotebookLmAccessToken(): string {
   try {
-    const token = execFileSync(
-      'gcloud',
-      ['auth', 'print-access-token'],
-      {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    ).trim();
+    const token = execFileSync('gcloud', ['auth', 'print-access-token'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
 
     if (!token) {
       throw new Error('Empty access token returned by gcloud');
@@ -187,7 +185,10 @@ function getApiRoot(config: NotebookLmConfig, upload = false): string {
   return `https://${config.endpointLocation}-discoveryengine.googleapis.com${upload ? '/upload' : ''}/v1alpha`;
 }
 
-function notebookResourcePath(config: NotebookLmConfig, notebookId?: string): string {
+function notebookResourcePath(
+  config: NotebookLmConfig,
+  notebookId?: string,
+): string {
   const base = `/projects/${config.projectNumber}/locations/${config.location}/notebooks`;
   return notebookId ? `${base}/${notebookId}` : base;
 }

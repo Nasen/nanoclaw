@@ -535,7 +535,10 @@ export class RingCentralChannel implements Channel {
     if (!this.platform) throw new Error('RC channel is not connected');
 
     const cappedLimit = Math.min(Math.max(limit, 1), 250);
-    const chats = await listChats(this.platform, Math.min(cappedLimit * 3, 250));
+    const chats = await listChats(
+      this.platform,
+      Math.min(cappedLimit * 3, 250),
+    );
     const normalizedQuery = query?.trim().toLowerCase();
 
     return chats
@@ -606,7 +609,10 @@ export class RingCentralChannel implements Channel {
     const postId = await sendPost(this.platform, chatId, text);
     if (postId) this.trackSent(postId);
 
-    logger.info({ jid: this.jidForChatId(chatId), length: text.length }, 'RC SDK message sent');
+    logger.info(
+      { jid: this.jidForChatId(chatId), length: text.length },
+      'RC SDK message sent',
+    );
 
     return {
       jid: this.jidForChatId(chatId),

@@ -56,7 +56,7 @@ export async function processMessageFiles(
             sourceGroup === 'rc-personal' &&
             (data.deliveryMode === undefined || data.deliveryMode === 'auto')
               ? 'personal'
-              : (data.deliveryMode || 'auto');
+              : data.deliveryMode || 'auto';
           await deps.sendMessage(
             effectiveChatJid,
             data.text,

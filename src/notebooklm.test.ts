@@ -141,7 +141,10 @@ describe('NotebookLM file handling', () => {
     fs.mkdirSync(groupDir, { recursive: true });
 
     const allowedFile = path.join(groupDir, 'allowed.md');
-    const blockedFile = path.join(os.tmpdir(), `nanoclaw-blocked-${Date.now()}.md`);
+    const blockedFile = path.join(
+      os.tmpdir(),
+      `nanoclaw-blocked-${Date.now()}.md`,
+    );
     fs.writeFileSync(allowedFile, 'ok');
     fs.writeFileSync(blockedFile, 'blocked');
 
