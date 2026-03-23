@@ -9,6 +9,7 @@ import {
 import { writeGroupsSnapshot } from './container-runner.js';
 import { startIpcWatcher } from './ipc.js';
 import { logger } from './logger.js';
+import { addNotebookLmSources, createNotebookLmClient } from './notebooklm.js';
 import { formatOutbound, resolveOutboundTarget } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, RcDeliveryMode, RegisteredGroup } from './types.js';
@@ -170,6 +171,20 @@ export function startSubsystems({
       readRcMessages(channels, chatRef, mode, limit),
     rcSendMessage: (chatRef, text, mode) =>
       sendRcMessage(channels, chatRef, text, mode),
+    notebookLmListNotebooks: (limit) =>
+      createNotebookLmClient().listNotebooks(limit),
+    notebookLmCreateNotebook: (title) =>
+      createNotebookLmClient().createNotebook(title),
+    notebookLmGetNotebook: (notebookId) =>
+      createNotebookLmClient().getNotebook(notebookId),
+    notebookLmAddSources: (notebookId, sources, sourceGroup, isMain) =>
+      addNotebookLmSources(
+        notebookId,
+        sources,
+        sourceGroup,
+        isMain,
+        createNotebookLmClient(),
+      ),
     writeGroupsSnapshot: (
       groupFolder,
       isMain,

@@ -7,6 +7,11 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isPersonalFolder } from './rc-auto-register.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  NotebookLmAddSourcesResult,
+  NotebookLmNotebook,
+  NotebookLmSourceInput,
+} from './notebooklm.js';
 import { RcDeliveryMode, RegisteredGroup } from './types.js';
 
 export interface TaskIpcData {
@@ -31,6 +36,10 @@ export interface TaskIpcData {
   limit?: number;
   text?: string;
   chatId?: string;
+  notebookId?: string;
+  title?: string;
+  pageSize?: number;
+  sources?: NotebookLmSourceInput[];
 }
 
 export interface TaskIpcDeps {
@@ -59,6 +68,15 @@ export interface TaskIpcDeps {
     text: string,
     mode: RcDeliveryMode,
   ) => Promise<{ jid: string; chatId: string; postId?: string }>;
+  notebookLmListNotebooks: (limit?: number) => Promise<NotebookLmNotebook[]>;
+  notebookLmCreateNotebook: (title: string) => Promise<NotebookLmNotebook>;
+  notebookLmGetNotebook: (notebookId: string) => Promise<NotebookLmNotebook>;
+  notebookLmAddSources: (
+    notebookId: string,
+    sources: NotebookLmSourceInput[],
+    sourceGroup: string,
+    isMain: boolean,
+  ) => Promise<NotebookLmAddSourcesResult>;
 }
 
 function computeNextRun(
@@ -374,11 +392,7 @@ export async function processTaskIpc(
         break;
       }
       try {
-        const transcript = await deps.rcReadMessages(
-          chatRef,
-          mode,
-          data.limit,
-        );
+        const transcript = await deps.rcReadMessages(chatRef, mode, data.limit);
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: true,
           transcript,
@@ -411,6 +425,96 @@ export async function processTaskIpc(
       }
       try {
         const result = await deps.rcSendMessage(chatRef, data.text, mode);
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          result,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'notebooklm_list_notebooks': {
+      try {
+        const notebooks = await deps.notebookLmListNotebooks(data.pageSize);
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          notebooks,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'notebooklm_create_notebook': {
+      if (!data.title) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'title is required.',
+        });
+        break;
+      }
+      try {
+        const notebook = await deps.notebookLmCreateNotebook(data.title);
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          notebook,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'notebooklm_get_notebook': {
+      if (!data.notebookId) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'notebookId is required.',
+        });
+        break;
+      }
+      try {
+        const notebook = await deps.notebookLmGetNotebook(data.notebookId);
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          notebook,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'notebooklm_add_sources': {
+      if (!data.notebookId || !data.sources?.length) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'notebookId and sources are required.',
+        });
+        break;
+      }
+      try {
+        const result = await deps.notebookLmAddSources(
+          data.notebookId,
+          data.sources,
+          sourceGroup,
+          isMain,
+        );
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: true,
           result,

@@ -68,23 +68,285 @@ async function requestTask(
   return waitForResponse(requestId, timeoutMs);
 }
 
+const notebookLmSourceSchema = z.union([
+  z.object({
+    type: z.literal('text'),
+    text: z.string().describe('Raw text content to add to the notebook.'),
+    title: z
+      .string()
+      .optional()
+      .describe('Optional display name for this text source.'),
+  }),
+  z.object({
+    type: z.literal('web'),
+    url: z.string().url().describe('Web URL to add as a source.'),
+    title: z
+      .string()
+      .optional()
+      .describe('Optional display name for this web source.'),
+  }),
+  z.object({
+    type: z.literal('file'),
+    path: z
+      .string()
+      .describe(
+        'Host file path to upload. Relative paths resolve from the current group folder.',
+      ),
+    title: z
+      .string()
+      .optional()
+      .describe('Optional display name for this uploaded file source.'),
+    contentType: z
+      .string()
+      .optional()
+      .describe(
+        'Optional MIME type override when the file extension is uncommon.',
+      ),
+  }),
+]);
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
 });
 
-server.tool(
-  'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. In personal-mode chats, this sends through the user's connected integration on their behalf in the current chat. You can call this multiple times.",
+server.registerTool(
+  'list_notebooklm_notebooks',
   {
-    text: z.string().describe('The message text to send'),
-    sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
-    delivery_mode: z
-      .enum(['auto', 'personal', 'bot'])
-      .optional()
-      .describe(
-        'Routing preference for the current chat. For RingCentral, "personal" uses Nasen\'s personal RC app/credentials, "bot" uses the RC bot app, and "auto" keeps the default route.',
-      ),
+    description:
+      'List recently viewed NotebookLM Enterprise notebooks for the configured Google Cloud project.',
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum notebooks to return.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'notebooklm_list_notebooks',
+        { pageSize: args.limit },
+        30000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to list NotebookLM notebooks.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.notebooks ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'create_notebooklm_notebook',
+  {
+    description:
+      'Create a NotebookLM Enterprise notebook in the configured Google Cloud project.',
+    inputSchema: {
+      title: z.string().describe('Notebook title.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'notebooklm_create_notebook',
+        { title: args.title },
+        30000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to create NotebookLM notebook.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.notebook ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'get_notebooklm_notebook',
+  {
+    description:
+      'Retrieve a NotebookLM Enterprise notebook, including any sources returned by the API.',
+    inputSchema: {
+      notebook_id: z.string().describe('NotebookLM notebook ID.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'notebooklm_get_notebook',
+        { notebookId: args.notebook_id },
+        30000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to retrieve NotebookLM notebook.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.notebook ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'add_notebooklm_sources',
+  {
+    description:
+      'Add raw text, web URLs, or local files as sources to a NotebookLM Enterprise notebook. This is explicit-only and does not sync chat history automatically.',
+    inputSchema: {
+      notebook_id: z.string().describe('NotebookLM notebook ID.'),
+      sources: z
+        .array(notebookLmSourceSchema)
+        .min(1)
+        .describe('One or more NotebookLM sources to add.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'notebooklm_add_sources',
+        {
+          notebookId: args.notebook_id,
+          sources: args.sources,
+        },
+        120000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to add NotebookLM sources.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.result ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'send_message',
+  {
+    description:
+      "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. In personal-mode chats, this sends through the user's connected integration on their behalf in the current chat. You can call this multiple times.",
+    inputSchema: {
+      text: z.string().describe('The message text to send'),
+      sender: z
+        .string()
+        .optional()
+        .describe(
+          'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
+        ),
+      delivery_mode: z
+        .enum(['auto', 'personal', 'bot'])
+        .optional()
+        .describe(
+          'Routing preference for the current chat. For RingCentral, "personal" uses Nasen\'s personal RC app/credentials, "bot" uses the RC bot app, and "auto" keeps the default route.',
+        ),
+    },
   },
   async (args) => {
     const data: Record<string, string | undefined> = {
@@ -103,9 +365,10 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'schedule_task',
-  `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
+  {
+    description: `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 
 CONTEXT MODE - Choose based on task type:
 \u2022 "group": Task runs in the group's conversation context, with access to chat history. Use for tasks that need context about ongoing discussions, user preferences, or recent interactions.
@@ -126,12 +389,35 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
 \u2022 cron: Standard cron expression (e.g., "*/5 * * * *" for every 5 minutes, "0 9 * * *" for daily at 9am LOCAL time)
 \u2022 interval: Milliseconds between runs (e.g., "300000" for 5 minutes, "3600000" for 1 hour)
 \u2022 once: Local time WITHOUT "Z" suffix (e.g., "2026-02-01T15:30:00"). Do NOT use UTC/Z suffix.`,
-  {
-    prompt: z.string().describe('What the agent should do when the task runs. For isolated mode, include all necessary context here.'),
-    schedule_type: z.enum(['cron', 'interval', 'once']).describe('cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time'),
-    schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)'),
-    context_mode: z.enum(['group', 'isolated']).default('group').describe('group=runs with chat history and memory, isolated=fresh session (include context in prompt)'),
-    target_group_jid: z.string().optional().describe('(Main group only) JID of the group to schedule the task for. Defaults to the current group.'),
+    inputSchema: {
+      prompt: z
+        .string()
+        .describe(
+          'What the agent should do when the task runs. For isolated mode, include all necessary context here.',
+        ),
+      schedule_type: z
+        .enum(['cron', 'interval', 'once'])
+        .describe(
+          'cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time',
+        ),
+      schedule_value: z
+        .string()
+        .describe(
+          'cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)',
+        ),
+      context_mode: z
+        .enum(['group', 'isolated'])
+        .default('group')
+        .describe(
+          'group=runs with chat history and memory, isolated=fresh session (include context in prompt)',
+        ),
+      target_group_jid: z
+        .string()
+        .optional()
+        .describe(
+          '(Main group only) JID of the group to schedule the task for. Defaults to the current group.',
+        ),
+    },
   },
   async (args) => {
     // Validate schedule_value before writing IPC
@@ -193,10 +479,13 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
   },
 );
 
-server.tool(
+server.registerTool(
   'list_tasks',
-  "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
-  {},
+  {
+    description:
+      "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
+    inputSchema: {},
+  },
   async () => {
     const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
 
@@ -231,13 +520,28 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'list_rc_chats',
-  'List RingCentral team or DM chats accessible through the integrated RC SDK. Use mode="personal" for Nasen personal credentials and mode="bot" for the RC bot app.',
   {
-    query: z.string().optional().describe('Optional text filter for chat name or chat ID.'),
-    limit: z.number().int().min(1).max(100).default(20).describe('Maximum chats to return.'),
-    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+    description:
+      'List RingCentral team or DM chats accessible through the integrated RC SDK. Use mode="personal" for Nasen personal credentials and mode="bot" for the RC bot app.',
+    inputSchema: {
+      query: z
+        .string()
+        .optional()
+        .describe('Optional text filter for chat name or chat ID.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum chats to return.'),
+      mode: z
+        .enum(['auto', 'personal', 'bot'])
+        .default('auto')
+        .describe('Which RC identity to use.'),
+    },
   },
   async (args) => {
     try {
@@ -264,13 +568,27 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'read_rc_messages',
-  'Read recent messages from a RingCentral team or DM chat using the integrated RC SDK.',
   {
-    chat_id: z.string().describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
-    limit: z.number().int().min(1).max(100).default(20).describe('Maximum messages to return.'),
-    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+    description:
+      'Read recent messages from a RingCentral team or DM chat using the integrated RC SDK.',
+    inputSchema: {
+      chat_id: z
+        .string()
+        .describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum messages to return.'),
+      mode: z
+        .enum(['auto', 'personal', 'bot'])
+        .default('auto')
+        .describe('Which RC identity to use.'),
+    },
   },
   async (args) => {
     try {
@@ -297,13 +615,21 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'send_rc_message',
-  'Send a RingCentral team or DM message through the integrated RC SDK.',
   {
-    chat_id: z.string().describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
-    text: z.string().describe('Message text to send.'),
-    mode: z.enum(['auto', 'personal', 'bot']).default('auto').describe('Which RC identity to use.'),
+    description:
+      'Send a RingCentral team or DM message through the integrated RC SDK.',
+    inputSchema: {
+      chat_id: z
+        .string()
+        .describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+      text: z.string().describe('Message text to send.'),
+      mode: z
+        .enum(['auto', 'personal', 'bot'])
+        .default('auto')
+        .describe('Which RC identity to use.'),
+    },
   },
   async (args) => {
     try {
@@ -330,10 +656,14 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'pause_task',
-  'Pause a scheduled task. It will not run until resumed.',
-  { task_id: z.string().describe('The task ID to pause') },
+  {
+    description: 'Pause a scheduled task. It will not run until resumed.',
+    inputSchema: {
+      task_id: z.string().describe('The task ID to pause'),
+    },
+  },
   async (args) => {
     const data = {
       type: 'pause_task',
@@ -349,10 +679,14 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'resume_task',
-  'Resume a paused task.',
-  { task_id: z.string().describe('The task ID to resume') },
+  {
+    description: 'Resume a paused task.',
+    inputSchema: {
+      task_id: z.string().describe('The task ID to resume'),
+    },
+  },
   async (args) => {
     const data = {
       type: 'resume_task',
@@ -368,10 +702,14 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'cancel_task',
-  'Cancel and delete a scheduled task.',
-  { task_id: z.string().describe('The task ID to cancel') },
+  {
+    description: 'Cancel and delete a scheduled task.',
+    inputSchema: {
+      task_id: z.string().describe('The task ID to cancel'),
+    },
+  },
   async (args) => {
     const data = {
       type: 'cancel_task',
@@ -387,14 +725,23 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'update_task',
-  'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
   {
-    task_id: z.string().describe('The task ID to update'),
-    prompt: z.string().optional().describe('New prompt for the task'),
-    schedule_type: z.enum(['cron', 'interval', 'once']).optional().describe('New schedule type'),
-    schedule_value: z.string().optional().describe('New schedule value (see schedule_task for format)'),
+    description:
+      'Update an existing scheduled task. Only provided fields are changed; omitted fields stay the same.',
+    inputSchema: {
+      task_id: z.string().describe('The task ID to update'),
+      prompt: z.string().optional().describe('New prompt for the task'),
+      schedule_type: z
+        .enum(['cron', 'interval', 'once'])
+        .optional()
+        .describe('New schedule type'),
+      schedule_value: z
+        .string()
+        .optional()
+        .describe('New schedule value (see schedule_task for format)'),
+    },
   },
   async (args) => {
     // Validate schedule_value if provided
@@ -437,16 +784,26 @@ server.tool(
   },
 );
 
-server.tool(
+server.registerTool(
   'register_group',
-  `Register a new chat/group so the agent can respond to messages there. Main group only.
+  {
+    description: `Register a new chat/group so the agent can respond to messages there. Main group only.
 
 Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
-  {
-    jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
-    name: z.string().describe('Display name for the group'),
-    folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
-    trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    inputSchema: {
+      jid: z
+        .string()
+        .describe(
+          'The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")',
+        ),
+      name: z.string().describe('Display name for the group'),
+      folder: z
+        .string()
+        .describe(
+          'Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")',
+        ),
+      trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    },
   },
   async (args) => {
     if (!isMain) {

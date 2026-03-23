@@ -6,11 +6,13 @@ import { AvailableGroup } from './container-runner.js';
 import { processMessageFiles } from './ipc-message-handler.js';
 import { processTaskIpc, TaskIpcData } from './ipc-task-handler.js';
 import { logger } from './logger.js';
-import { RcDeliveryMode, RegisteredGroup } from './types.js';
 import {
-  RcChatSummary,
-  RcChatTranscript,
-} from './channels/ringcentral.js';
+  NotebookLmAddSourcesResult,
+  NotebookLmNotebook,
+  NotebookLmSourceInput,
+} from './notebooklm.js';
+import { RcDeliveryMode, RegisteredGroup } from './types.js';
+import { RcChatSummary, RcChatTranscript } from './channels/ringcentral.js';
 
 export { processTaskIpc } from './ipc-task-handler.js';
 
@@ -45,6 +47,15 @@ export interface IpcDeps {
     text: string,
     mode: RcDeliveryMode,
   ) => Promise<{ jid: string; chatId: string; postId?: string }>;
+  notebookLmListNotebooks: (limit?: number) => Promise<NotebookLmNotebook[]>;
+  notebookLmCreateNotebook: (title: string) => Promise<NotebookLmNotebook>;
+  notebookLmGetNotebook: (notebookId: string) => Promise<NotebookLmNotebook>;
+  notebookLmAddSources: (
+    notebookId: string,
+    sources: NotebookLmSourceInput[],
+    sourceGroup: string,
+    isMain: boolean,
+  ) => Promise<NotebookLmAddSourcesResult>;
 }
 
 let ipcWatcherRunning = false;

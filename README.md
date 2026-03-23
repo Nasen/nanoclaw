@@ -241,6 +241,31 @@ This OpenAI backend is useful when your Claude Code quota is constrained or when
 
 You can extend the backend interface to add more CLIs or model providers later without rewriting the host orchestrator.
 
+**NotebookLM Enterprise source tools**
+
+NanoClaw can also manage NotebookLM Enterprise notebooks and sources through its existing tool path. This does not replace the Claude/OpenAI backend; it adds explicit tools for notebook creation and source ingestion.
+
+```bash
+NOTEBOOKLM_PROJECT_NUMBER=123456789012
+NOTEBOOKLM_LOCATION=global
+NOTEBOOKLM_ENDPOINT_LOCATION=global
+```
+
+Authentication is host-side via `gcloud`:
+
+```bash
+gcloud auth login
+gcloud auth print-access-token
+```
+
+The new tools are:
+- `list_notebooklm_notebooks`
+- `create_notebooklm_notebook`
+- `get_notebooklm_notebook`
+- `add_notebooklm_sources`
+
+`add_notebooklm_sources` supports raw text, web URLs, and local files. File uploads are intentionally restricted to NanoClaw-owned paths: the current group folder, `groups/global`, and the repo root when invoked from the main group.
+
 **How do I debug issues?**
 
 Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.

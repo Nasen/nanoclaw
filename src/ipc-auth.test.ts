@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -70,6 +70,19 @@ beforeEach(() => {
       messages: [],
     }),
     rcSendMessage: async () => ({ jid: 'rc:1', chatId: '1' }),
+    notebookLmListNotebooks: async () => [],
+    notebookLmCreateNotebook: async (title) => ({
+      notebookId: 'nb-1',
+      title,
+    }),
+    notebookLmGetNotebook: async (notebookId) => ({
+      notebookId,
+      title: 'Notebook',
+    }),
+    notebookLmAddSources: async () => ({
+      createdSources: [],
+      uploadedFiles: [],
+    }),
   };
 });
 
@@ -682,5 +695,53 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+describe('NotebookLM IPC handlers', () => {
+  it('creates a notebook through the host NotebookLM service', async () => {
+    const createNotebook = vi.fn(async (title: string) => ({
+      notebookId: 'nb-created',
+      title,
+    }));
+    deps.notebookLmCreateNotebook = createNotebook;
+
+    await processTaskIpc(
+      {
+        type: 'notebooklm_create_notebook',
+        title: 'Research Notes',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(createNotebook).toHaveBeenCalledWith('Research Notes');
+  });
+
+  it('adds NotebookLM sources with group context for file-path validation', async () => {
+    const addSources = vi.fn(async () => ({
+      createdSources: [],
+      uploadedFiles: [],
+    }));
+    deps.notebookLmAddSources = addSources;
+
+    await processTaskIpc(
+      {
+        type: 'notebooklm_add_sources',
+        notebookId: 'nb-1',
+        sources: [{ type: 'text', text: 'hello' }],
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(addSources).toHaveBeenCalledWith(
+      'nb-1',
+      [{ type: 'text', text: 'hello' }],
+      'other-group',
+      false,
+    );
   });
 });

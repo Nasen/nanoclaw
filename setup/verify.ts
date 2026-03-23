@@ -116,6 +116,7 @@ export async function run(_args: string[]): Promise<void> {
     'SLACK_BOT_TOKEN',
     'SLACK_APP_TOKEN',
     'DISCORD_BOT_TOKEN',
+    'NOTEBOOKLM_PROJECT_NUMBER',
   ]);
 
   const channelAuth: Record<string, string> = {};
@@ -169,10 +170,26 @@ export async function run(_args: string[]): Promise<void> {
     mountAllowlist = 'configured';
   }
 
+  // 7. Check NotebookLM host auth when configured
+  let notebookLm = 'not_configured';
+  const notebookLmConfigured = Boolean(
+    process.env.NOTEBOOKLM_PROJECT_NUMBER || envVars.NOTEBOOKLM_PROJECT_NUMBER,
+  );
+  if (notebookLmConfigured) {
+    try {
+      execSync('command -v gcloud', { stdio: 'ignore' });
+      execSync('gcloud auth print-access-token', { stdio: 'ignore' });
+      notebookLm = 'configured';
+    } catch {
+      notebookLm = 'auth_error';
+    }
+  }
+
   // Determine overall status
   const status =
     service === 'running' &&
     credentials !== 'missing' &&
+    notebookLm !== 'auth_error' &&
     anyChannelConfigured &&
     registeredGroups > 0
       ? 'success'
@@ -188,6 +205,7 @@ export async function run(_args: string[]): Promise<void> {
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
+    NOTEBOOKLM: notebookLm,
     STATUS: status,
     LOG: 'logs/setup.log',
   });
