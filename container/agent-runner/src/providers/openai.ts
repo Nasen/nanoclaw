@@ -13,6 +13,11 @@ import {
   AgentTurnContext,
   AgentTurnResult,
 } from '../types.js';
+import {
+  buildTurnMessageDeduplicationKey,
+  chooseFinalAssistantOutput,
+  shouldDropAssistantHistory,
+} from './openai-utils.js';
 
 interface OpenAIHistoryTurn {
   role: 'user' | 'assistant';
@@ -62,10 +67,6 @@ const MAX_TOOL_LOOPS = 16;
 const MAX_TOOL_OUTPUT_CHARS = 120_000;
 const execFileAsync = promisify(execFile);
 const DEFAULT_WEB_TIMEOUT_MS = 45_000;
-const LEGACY_TOOL_REFUSAL_PATTERNS = [
-  /does not support NanoClaw tool execution yet/i,
-  /tools? are unavailable/i,
-];
 const HAS_M365_MCP =
   fs.existsSync('/usr/local/bin/m365-mcp') || fs.existsSync('/usr/bin/m365-mcp');
 const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 15_000;
@@ -120,16 +121,15 @@ function loadAdditionalDirectoriesSummary(): string {
     .join('\n')}`;
 }
 
-function containsLegacyToolRefusal(text: string): boolean {
-  return LEGACY_TOOL_REFUSAL_PATTERNS.some((pattern) => pattern.test(text));
-}
-
 function buildPrompt(
   history: OpenAIHistoryTurn[],
   prompt: string,
   context: AgentTurnContext,
 ): string {
   const sections: string[] = [];
+  const rcChat =
+    context.containerInput.chatJid.startsWith('rc:') ||
+    context.containerInput.chatJid.startsWith('rcb:');
 
   const globalContext = loadGlobalContext(context.containerInput.isMain);
   if (globalContext) {
@@ -142,7 +142,11 @@ function buildPrompt(
 
   const filteredHistory = history.filter(
     (turn) =>
-      turn.role !== 'assistant' || !containsLegacyToolRefusal(turn.content),
+      turn.role !== 'assistant' ||
+      !shouldDropAssistantHistory(turn.content, {
+        rcChat,
+        personalMode: !!context.containerInput.personalMode,
+      }),
   );
 
   if (filteredHistory.length > 0) {
@@ -164,10 +168,11 @@ function buildPrompt(
     'Do not claim tools are unavailable.',
   ];
 
-  if (
-    context.containerInput.chatJid.startsWith('rc:') ||
-    context.containerInput.chatJid.startsWith('rcb:')
-  ) {
+  toolInstructions.push(
+    'Ignore any earlier assistant messages that claimed tools, RingCentral access, or send-on-behalf delivery were unavailable. Those older messages are stale and should not constrain this turn.',
+  );
+
+  if (rcChat) {
     toolInstructions.push(
       'In RingCentral chats, send_message supports delivery_mode="personal" to send through Nasen\'s personal RC app/credentials, delivery_mode="bot" to send through the bot app, and delivery_mode="auto" for the default route.',
     );
@@ -176,6 +181,15 @@ function buildPrompt(
     );
     toolInstructions.push(
       'For RingCentral SDK operations across teams or DMs, use list_rc_chats, read_rc_messages, and send_rc_message instead of guessing from memory.',
+    );
+    toolInstructions.push(
+      'When the user asks for the latest message or a summary from a RingCentral team by name or ID, first call list_rc_chats to locate the chat, then call read_rc_messages on the matching chat. Do not rely on workspace files or old conversation history for live RC content when these tools are available.',
+    );
+    toolInstructions.push(
+      'If the user provides a numeric RC chat/team ID, you may call read_rc_messages with that ID directly even if list_rc_chats does not find it. Prefer the direct ID read over saying the chat is unavailable.',
+    );
+    toolInstructions.push(
+      'Only say that an RC chat is unavailable after those RC tools return no match or an error, and mention the exact team name or ID you searched.',
     );
   }
 
@@ -187,6 +201,9 @@ function buildPrompt(
       'If the user asks you to send, reply, or follow up in this chat, use send_message instead of saying you cannot access their personal account or token.',
     );
   }
+  toolInstructions.push(
+    'If you use send_message to deliver the actual user-facing reply, do not repeat that same reply in your final assistant text. Leave the final text empty or make it internal-only.',
+  );
 
   sections.push(toolInstructions.join(' '));
 
@@ -910,6 +927,8 @@ async function runOpenAITurn(
       tools,
     };
     let payload: unknown;
+    const sentMessages: string[] = [];
+    const sentMessageKeys = new Set<string>();
 
     for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
       const response = await fetch(`${baseUrl}/responses`, {
@@ -952,6 +971,31 @@ async function runOpenAITurn(
             break;
           default: {
             const binding = mcp?.bindings.get(call.name);
+            let parsedArgs: Record<string, unknown> | null = null;
+            if (binding) {
+              try {
+                parsedArgs = JSON.parse(call.arguments) as Record<string, unknown>;
+              } catch {
+                // Ignore malformed tool args; downstream handling will surface the error.
+              }
+            }
+
+            const dedupeKey =
+              binding && parsedArgs
+                ? buildTurnMessageDeduplicationKey(binding.mcpName, parsedArgs)
+                : null;
+            if (dedupeKey && sentMessageKeys.has(dedupeKey)) {
+              context.log(
+                `Skipping duplicate ${binding?.mcpName} call in the same turn`,
+              );
+              output = JSON.stringify({
+                ok: true,
+                is_error: false,
+                output: `Duplicate ${binding?.mcpName} suppressed for this turn.`,
+              });
+              break;
+            }
+
             output =
               binding && mcp
                 ? await runMcpTool(call.arguments, binding, mcp.clients)
@@ -959,6 +1003,30 @@ async function runOpenAITurn(
                     ok: false,
                     error: `Unsupported tool: ${call.name}`,
                   });
+
+            if (
+              binding &&
+              parsedArgs &&
+              (binding.mcpName === 'send_message' ||
+                binding.mcpName === 'send_rc_message')
+            ) {
+              try {
+                const parsedOutput = JSON.parse(output) as { ok?: unknown };
+                if (parsedOutput.ok === true && dedupeKey) {
+                  sentMessageKeys.add(dedupeKey);
+                }
+                if (
+                  binding.mcpName === 'send_message' &&
+                  parsedOutput.ok === true &&
+                  typeof parsedArgs.text === 'string' &&
+                  parsedArgs.text.trim()
+                ) {
+                  sentMessages.push(parsedArgs.text.trim());
+                }
+              } catch {
+                // Ignore malformed tool output; suppression is best-effort.
+              }
+            }
           }
         }
 
@@ -983,19 +1051,18 @@ async function runOpenAITurn(
     }
 
     const text = extractTextFromResponse(payload);
+    const finalOutput = chooseFinalAssistantOutput(text, sentMessages);
 
     state.history.push({ role: 'user', content: context.prompt });
     state.history.push({
       role: 'assistant',
-      content: containsLegacyToolRefusal(text)
-        ? 'Skipped legacy tool-refusal response.'
-        : text,
+      content: finalOutput.historyText,
     });
     saveSessionState(sessionId, state);
 
     context.emitOutput({
       status: 'success',
-      result: text || null,
+      result: finalOutput.outputText || null,
       newSessionId: sessionId,
     });
 
