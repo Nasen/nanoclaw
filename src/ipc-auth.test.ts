@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
 
+import { DATA_DIR } from './config.js';
 import {
   _initTestDatabase,
   createTask,
@@ -70,6 +73,24 @@ beforeEach(() => {
       messages: [],
     }),
     rcSendMessage: async () => ({ jid: 'rc:1', chatId: '1' }),
+    rcListChatMembers: async () => [],
+    rcGetPresence: async () => ({ userStatus: 'Available' }),
+    rcSetPresence: async (mode, update) => ({
+      extensionId: mode,
+      ...update,
+    }),
+    rcGetExtension: async (mode, extensionId) => ({
+      id: extensionId ?? 'self',
+      name: mode,
+    }),
+    rcListExtensions: async () => [],
+    rcListContacts: async () => [],
+    rcCreateContact: async (mode, contact) => ({
+      id: 'contact-1',
+      firstName: mode,
+      ...contact,
+    }),
+    rcListPhoneNumbers: async () => [],
     notebookLmListNotebooks: async () => [],
     notebookLmCreateNotebook: async (title) => ({
       notebookId: 'nb-1',
@@ -84,6 +105,8 @@ beforeEach(() => {
       uploadedFiles: [],
     }),
   };
+
+  fs.rmSync(path.join(DATA_DIR, 'ipc'), { recursive: true, force: true });
 });
 
 // --- schedule_task authorization ---
@@ -695,6 +718,121 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+describe('RingCentral IPC handlers', () => {
+  it('defaults account-level RC requests to personal mode', async () => {
+    const getPresence = vi.fn(async () => ({ userStatus: 'Available' }));
+    deps.rcGetPresence = getPresence;
+
+    await processTaskIpc(
+      {
+        type: 'rc_get_presence',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(getPresence).toHaveBeenCalledWith('personal', undefined);
+  });
+
+  it('keeps chat-level RC requests on bot mode by default outside rc-personal', async () => {
+    const listMembers = vi.fn(async () => []);
+    deps.rcListChatMembers = listMembers;
+
+    await processTaskIpc(
+      {
+        type: 'rc_list_chat_members',
+        chatId: '12345',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(listMembers).toHaveBeenCalledWith('12345', 'bot', undefined);
+  });
+
+  it('forwards contact payloads to RC contact creation', async () => {
+    const createContact = vi.fn(async () => ({ id: 'contact-1' }));
+    deps.rcCreateContact = createContact;
+
+    await processTaskIpc(
+      {
+        type: 'rc_create_contact',
+        contact: {
+          firstName: 'Jane',
+          lastName: 'Doe',
+          email: 'jane@example.com',
+        },
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    expect(createContact).toHaveBeenCalledWith('personal', {
+      firstName: 'Jane',
+      lastName: 'Doe',
+      email: 'jane@example.com',
+    });
+  });
+
+  it('blocks RC account tools from non-main, non-personal groups', async () => {
+    const getExtension = vi.fn(async () => ({ id: '101' }));
+    deps.rcGetExtension = getExtension;
+
+    await processTaskIpc(
+      {
+        type: 'rc_get_extension',
+        extensionId: '101',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    expect(getExtension).not.toHaveBeenCalled();
+  });
+
+  it('writes a timeout error response when an RC IPC request stalls', async () => {
+    vi.useFakeTimers();
+    try {
+      deps.rcListChats = vi.fn(async () => await new Promise<never>(() => {}));
+
+      const requestId = 'timeout-rc-list-chats';
+      const taskPromise = processTaskIpc(
+        {
+          type: 'rc_list_chats',
+          requestId,
+          query: 'Jupiter + NC CI Status',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      await taskPromise;
+
+      const responsePath = path.join(
+        DATA_DIR,
+        'ipc',
+        'whatsapp_main',
+        'responses',
+        `${requestId}.json`,
+      );
+      const response = JSON.parse(
+        fs.readFileSync(responsePath, 'utf-8'),
+      ) as { ok: boolean; error?: string };
+
+      expect(response.ok).toBe(false);
+      expect(response.error).toContain('rc_list_chats timed out after 15000ms');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

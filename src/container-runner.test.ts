@@ -140,8 +140,8 @@ describe('container-runner timeout behavior', () => {
     // Let output processing settle
     await vi.advanceTimersByTimeAsync(10);
 
-    // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
-    await vi.advanceTimersByTimeAsync(1830000);
+    // Fire the hard timeout (default CONTAINER_TIMEOUT = 1800000ms)
+    await vi.advanceTimersByTimeAsync(1800000);
 
     // Emit close event (as if container was stopped by the timeout)
     fakeProc.emit('close', 137);
@@ -167,7 +167,7 @@ describe('container-runner timeout behavior', () => {
     );
 
     // No output emitted — fire the hard timeout
-    await vi.advanceTimersByTimeAsync(1830000);
+    await vi.advanceTimersByTimeAsync(1800000);
 
     // Emit close event
     fakeProc.emit('close', 137);
@@ -206,5 +206,26 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('uses a shorter default timeout for rc-personal', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      {
+        ...testGroup,
+        folder: 'rc-personal',
+      },
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    await vi.advanceTimersByTimeAsync(240000);
+    fakeProc.emit('close', 137);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('timed out');
   });
 });

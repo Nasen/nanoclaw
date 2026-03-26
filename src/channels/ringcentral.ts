@@ -24,8 +24,12 @@ const _require = createRequire(import.meta.url);
 const RcWsExtension = _require('@rc-ex/ws');
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
-import { updateChatName } from '../db.js';
-import { readEnvFile } from '../env.js';
+import {
+  findChatsByQuery,
+  findOpaqueChatsByPrefix,
+  updateChatName,
+} from '../db.js';
+import { readEnvFile, readEnvFileByPrefix } from '../env.js';
 import { logger } from '../logger.js';
 import { autoRegisterContact } from '../rc-auto-register.js';
 import {
@@ -47,6 +51,7 @@ interface RCCredentials {
   clientSecret: string;
   jwt?: string;
   botToken?: string;
+  botTokensByOwnerId?: Record<string, string>;
   server: string;
 }
 
@@ -71,31 +76,123 @@ export interface RcChatTranscript {
   messages: RcChatMessage[];
 }
 
+export interface RcChatMember {
+  id?: string;
+  name?: string;
+  email?: string;
+  [key: string]: unknown;
+}
+
+export interface RcPresence {
+  extensionId?: string;
+  userStatus?: string;
+  dndStatus?: string;
+  [key: string]: unknown;
+}
+
+export interface RcPresenceUpdateInput {
+  userStatus?: string;
+  dndStatus?: string;
+}
+
+export interface RcExtensionSummary {
+  id?: string | number;
+  extensionNumber?: string;
+  name?: string;
+  email?: string;
+  contact?: {
+    firstName?: string;
+    lastName?: string;
+    email?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface RcContact {
+  id?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  company?: string;
+  jobTitle?: string;
+  [key: string]: unknown;
+}
+
+interface RcDirectoryEntry {
+  id?: string | number;
+  type?: string;
+  status?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  extensionNumber?: string;
+  [key: string]: unknown;
+}
+
+export interface RcContactInput {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  company?: string;
+  jobTitle?: string;
+  businessPhone?: string;
+  mobilePhone?: string;
+  homePhone?: string;
+  otherPhone?: string;
+}
+
+export interface RcPhoneNumber {
+  phoneNumber?: string;
+  usageType?: string;
+  type?: string;
+  extension?: {
+    id?: string | number;
+    extensionNumber?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+interface RcChatListItem {
+  id?: string;
+  name?: string;
+  type?: string;
+  members?: Array<{
+    id?: string;
+  }>;
+}
+
+interface RcChatListPage {
+  records?: RcChatListItem[];
+  navigation?: {
+    nextPageToken?: string;
+    prevPageToken?: string;
+  };
+}
+
+function extractOwnerScopedBotTokens(
+  values: Record<string, string>,
+): Record<string, string> | undefined {
+  const entries = Object.entries(values).map(([key, value]) => [
+    key.slice('RC_BOT_TOKEN_OWNER_'.length),
+    value,
+  ]);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 // ─── SDK singleton cache ─────────────────────────────────────────────────────
 
 const sdkCache = new Map<
   string,
   { sdk: RCSdk; platform: RCPlatform; creds: RCCredentials }
 >();
+const globalSentPostIds = new Map<string, number>();
 
-async function getSDK(creds: RCCredentials): Promise<{
+async function createAuthenticatedSdk(creds: RCCredentials): Promise<{
   sdk: RCSdk;
   platform: RCPlatform;
 }> {
-  const key = `${creds.clientId}:${creds.server}`;
-  const cached = sdkCache.get(key);
-
-  const cacheToken = creds.botToken ?? creds.jwt ?? '';
-  if (
-    cached &&
-    (cached.creds.botToken ?? cached.creds.jwt ?? '') === cacheToken
-  ) {
-    const loggedIn = creds.botToken
-      ? !!(await cached.platform.auth().data()).access_token
-      : await cached.platform.loggedIn().catch(() => false);
-    if (loggedIn) return cached;
-  }
-
   const sdk = new SDK({
     server: creds.server,
     clientId: creds.clientId,
@@ -184,6 +281,28 @@ async function getSDK(creds: RCCredentials): Promise<{
     throw new Error('Either RC_JWT or RC_BOT_TOKEN must be set in .env');
   }
 
+  return { sdk, platform };
+}
+
+async function getSDK(creds: RCCredentials): Promise<{
+  sdk: RCSdk;
+  platform: RCPlatform;
+}> {
+  const key = `${creds.clientId}:${creds.server}`;
+  const cached = sdkCache.get(key);
+
+  const cacheToken = creds.botToken ?? creds.jwt ?? '';
+  if (
+    cached &&
+    (cached.creds.botToken ?? cached.creds.jwt ?? '') === cacheToken
+  ) {
+    const loggedIn = creds.botToken
+      ? !!(await cached.platform.auth().data()).access_token
+      : await cached.platform.loggedIn().catch(() => false);
+    if (loggedIn) return cached;
+  }
+
+  const { sdk, platform } = await createAuthenticatedSdk(creds);
   const entry = { sdk, platform, creds };
   sdkCache.set(key, entry);
   return entry;
@@ -192,6 +311,40 @@ async function getSDK(creds: RCCredentials): Promise<{
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 const TM_BASE = '/team-messaging/v1';
+
+function stripUndefined<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(
+      ([, current]) => current !== undefined && current !== '',
+    ),
+  ) as T;
+}
+
+function matchesQuery(
+  query: string | undefined,
+  values: Array<string | number | undefined>,
+): boolean {
+  const normalizedQuery = query?.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return values.some((value) =>
+    String(value ?? '')
+      .toLowerCase()
+      .includes(normalizedQuery),
+  );
+}
+
+function shouldRetryRcRead(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes('401') ||
+    message.includes('403') ||
+    message.includes('404') ||
+    /unauthorized/i.test(message) ||
+    /forbidden/i.test(message) ||
+    /not found/i.test(message) ||
+    /resource not found/i.test(message)
+  );
+}
 
 async function sendPost(
   platform: RCPlatform,
@@ -203,6 +356,19 @@ async function sendPost(
   });
   const body = (await resp.json()) as { id?: string };
   return body?.id;
+}
+
+async function verifySentPostCreator(
+  platform: RCPlatform,
+  chatId: string,
+  postId: string,
+): Promise<string | undefined> {
+  try {
+    const posts = await listPosts(platform, chatId, 10);
+    return posts.find((post) => post.id === postId)?.creatorId;
+  } catch {
+    return undefined;
+  }
 }
 
 async function fetchUser(
@@ -223,27 +389,159 @@ async function fetchUser(
 
 async function listChats(
   platform: RCPlatform,
-  limit = 250,
-): Promise<Array<{ id?: string; name?: string }>> {
+  options: {
+    limit?: number;
+    query?: string;
+    fetchAll?: boolean;
+    pageSize?: number;
+    suppressErrors?: boolean;
+  } = {},
+): Promise<RcChatListItem[]> {
   try {
-    const resp = await platform.get(`${TM_BASE}/chats`, {
-      recordCount: String(limit),
-    });
-    const body = (await resp.json()) as {
-      records?: Array<{ id?: string; name?: string }>;
-    };
-    return body?.records ?? [];
-  } catch {
-    return [];
+    return _listChatsPaginated(async (pageToken, pageSize) => {
+      const resp = await platform.get(
+        `${TM_BASE}/chats`,
+        stripUndefined({
+          recordCount: String(pageSize),
+          pageToken,
+        }),
+      );
+      return (await resp.json()) as RcChatListPage;
+    }, options);
+  } catch (err) {
+    if (options.suppressErrors) {
+      logger.warn({ err }, 'Failed to list RC chats');
+      return [];
+    }
+    throw err;
   }
+}
+
+async function listTeams(
+  platform: RCPlatform,
+  options: {
+    limit?: number;
+    query?: string;
+    fetchAll?: boolean;
+    pageSize?: number;
+    suppressErrors?: boolean;
+  } = {},
+): Promise<RcChatListItem[]> {
+  try {
+    return _listChatsPaginated(async (pageToken, pageSize) => {
+      const resp = await platform.get(
+        `${TM_BASE}/teams`,
+        stripUndefined({
+          recordCount: String(pageSize),
+          pageToken,
+        }),
+      );
+      return (await resp.json()) as RcChatListPage;
+    }, options);
+  } catch (err) {
+    if (options.suppressErrors) {
+      logger.warn({ err }, 'Failed to list RC teams');
+      return [];
+    }
+    throw err;
+  }
+}
+
+/**
+ * @internal - exported for testing.
+ * RingCentral chat search must paginate because older teams may not appear on
+ * the first page; otherwise they remain searchable only by raw JID.
+ */
+export async function _listChatsPaginated(
+  fetchPage: (
+    pageToken: string | undefined,
+    pageSize: number,
+  ) => Promise<RcChatListPage>,
+  options: {
+    limit?: number;
+    query?: string;
+    fetchAll?: boolean;
+    pageSize?: number;
+  } = {},
+): Promise<RcChatListItem[]> {
+  const pageSize = Math.min(Math.max(options.pageSize ?? 250, 1), 250);
+  const limit = Math.max(options.limit ?? pageSize, 1);
+  const fetchAll = options.fetchAll ?? false;
+  const shouldDeepSearch = fetchAll || !!options.query?.trim();
+  const seenPageTokens = new Set<string>();
+  const seenChatIds = new Set<string>();
+  const pendingPageTokens: Array<string | undefined> = [undefined];
+  const results: RcChatListItem[] = [];
+
+  for (let page = 0; page < 50 && pendingPageTokens.length > 0; page++) {
+    const pageToken = pendingPageTokens.shift();
+    const body = await fetchPage(pageToken, pageSize);
+    const records = body.records ?? [];
+
+    for (const chat of records) {
+      if (chat.id && seenChatIds.has(chat.id)) continue;
+      if (chat.id) seenChatIds.add(chat.id);
+      if (!matchesQuery(options.query, [chat.id, chat.name])) continue;
+      results.push(chat);
+      if (!fetchAll && results.length >= limit) {
+        return results.slice(0, limit);
+      }
+    }
+
+    if (!shouldDeepSearch) {
+      break;
+    }
+
+    for (const nextToken of [
+      body.navigation?.prevPageToken,
+      body.navigation?.nextPageToken,
+    ]) {
+      if (!nextToken || seenPageTokens.has(nextToken)) continue;
+      seenPageTokens.add(nextToken);
+      pendingPageTokens.push(nextToken);
+    }
+  }
+
+  return fetchAll ? results : results.slice(0, limit);
+}
+
+function mergeChatListItems(...lists: RcChatListItem[][]): RcChatListItem[] {
+  const merged = new Map<string, RcChatListItem>();
+  for (const list of lists) {
+    for (const item of list) {
+      if (!item.id) continue;
+      const existing = merged.get(item.id);
+      if (!existing) {
+        merged.set(item.id, item);
+        continue;
+      }
+      merged.set(item.id, {
+        id: item.id,
+        name: existing.name || item.name,
+      });
+    }
+  }
+  return Array.from(merged.values());
 }
 
 async function getChat(
   platform: RCPlatform,
   chatId: string,
-): Promise<{ id?: string; name?: string } | null> {
+): Promise<RcChatListItem | null> {
   try {
     const resp = await platform.get(`${TM_BASE}/chats/${chatId}`);
+    return (await resp.json()) as RcChatListItem;
+  } catch {
+    return null;
+  }
+}
+
+async function getTeam(
+  platform: RCPlatform,
+  teamId: string,
+): Promise<{ id?: string; name?: string } | null> {
+  try {
+    const resp = await platform.get(`${TM_BASE}/teams/${teamId}`);
     return (await resp.json()) as { id?: string; name?: string };
   } catch {
     return null;
@@ -275,9 +573,198 @@ async function listPosts(
       }>;
     };
     return body.records ?? [];
-  } catch {
-    return [];
+  } catch (err) {
+    logger.warn({ chatId, err }, 'Failed to list RC chat posts');
+    throw err;
   }
+}
+
+async function listChatMembers(
+  platform: RCPlatform,
+  chatId: string,
+  limit = 100,
+): Promise<RcChatMember[]> {
+  const resp = await platform.get(`${TM_BASE}/chats/${chatId}/members`, {
+    recordCount: String(limit),
+  });
+  const body = (await resp.json()) as { records?: RcChatMember[] };
+  return body.records ?? [];
+}
+
+async function getPresence(
+  platform: RCPlatform,
+  extensionId = '~',
+): Promise<RcPresence> {
+  const resp = await platform.get(
+    `/restapi/v1.0/account/~/extension/${extensionId}/presence`,
+  );
+  return (await resp.json()) as RcPresence;
+}
+
+async function setPresence(
+  platform: RCPlatform,
+  update: RcPresenceUpdateInput,
+): Promise<RcPresence> {
+  const resp = await platform.put(
+    '/restapi/v1.0/account/~/extension/~/presence',
+    stripUndefined(update),
+  );
+  return (await resp.json()) as RcPresence;
+}
+
+async function getExtension(
+  platform: RCPlatform,
+  extensionId = '~',
+): Promise<RcExtensionSummary> {
+  const resp = await platform.get(
+    `/restapi/v1.0/account/~/extension/${extensionId}`,
+  );
+  return (await resp.json()) as RcExtensionSummary;
+}
+
+async function listExtensions(
+  platform: RCPlatform,
+  limit = 100,
+): Promise<RcExtensionSummary[]> {
+  const resp = await platform.get('/restapi/v1.0/account/~/extension', {
+    page: '1',
+    perPage: String(limit),
+  });
+  const body = (await resp.json()) as { records?: RcExtensionSummary[] };
+  return body.records ?? [];
+}
+
+async function searchDirectoryEntries(
+  platform: RCPlatform,
+  query: string,
+  limit = 20,
+): Promise<RcDirectoryEntry[]> {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return [];
+
+  const results: RcDirectoryEntry[] = [];
+  const perPage = 250;
+  let page = 1;
+  let totalPages = 1;
+
+  while (page <= totalPages) {
+    const resp = await platform.get(
+      '/restapi/v1.0/account/~/directory/entries',
+      {
+        page: String(page),
+        perPage: String(perPage),
+      },
+    );
+    const body = (await resp.json()) as {
+      records?: RcDirectoryEntry[];
+      paging?: {
+        totalPages?: number;
+      };
+    };
+    totalPages = Math.max(body.paging?.totalPages ?? page, page);
+
+    for (const entry of body.records ?? []) {
+      const values = [
+        entry.id ? String(entry.id) : undefined,
+        entry.extensionNumber,
+        entry.email,
+        entry.firstName,
+        entry.lastName,
+        [entry.firstName, entry.lastName].filter(Boolean).join(' '),
+      ];
+      if (!matchesQuery(query, values)) continue;
+      results.push(entry);
+    }
+
+    page += 1;
+  }
+
+  const scoreEntry = (entry: RcDirectoryEntry): number => {
+    const fullName = [entry.firstName, entry.lastName]
+      .filter(Boolean)
+      .join(' ')
+      .trim()
+      .toLowerCase();
+    const email = entry.email?.trim().toLowerCase();
+    const extensionNumber = entry.extensionNumber?.trim().toLowerCase();
+    const id = entry.id ? String(entry.id).toLowerCase() : undefined;
+
+    if (fullName === normalizedQuery) return 0;
+    if (email === normalizedQuery || extensionNumber === normalizedQuery) {
+      return 1;
+    }
+    if (id === normalizedQuery) return 2;
+    if (fullName.startsWith(normalizedQuery)) return 3;
+    if (email?.startsWith(normalizedQuery)) return 4;
+    return 5;
+  };
+
+  return results
+    .sort((a, b) => {
+      const statusScoreA = a.status === 'Enabled' ? 0 : 1;
+      const statusScoreB = b.status === 'Enabled' ? 0 : 1;
+      if (statusScoreA !== statusScoreB) return statusScoreA - statusScoreB;
+
+      const scoreA = scoreEntry(a);
+      const scoreB = scoreEntry(b);
+      if (scoreA !== scoreB) return scoreA - scoreB;
+
+      const nameA = [a.firstName, a.lastName].filter(Boolean).join(' ');
+      const nameB = [b.firstName, b.lastName].filter(Boolean).join(' ');
+      return nameA.localeCompare(nameB);
+    })
+    .slice(0, limit);
+}
+
+async function listContacts(
+  platform: RCPlatform,
+  limit = 100,
+): Promise<RcContact[]> {
+  const resp = await platform.get(
+    '/restapi/v1.0/account/~/extension/~/address-book/contact',
+    {
+      page: '1',
+      perPage: String(limit),
+    },
+  );
+  const body = (await resp.json()) as { records?: RcContact[] };
+  return body.records ?? [];
+}
+
+async function createContact(
+  platform: RCPlatform,
+  contact: RcContactInput,
+): Promise<RcContact> {
+  const resp = await platform.post(
+    '/restapi/v1.0/account/~/extension/~/address-book/contact',
+    stripUndefined(contact),
+  );
+  return (await resp.json()) as RcContact;
+}
+
+async function listPhoneNumbers(
+  platform: RCPlatform,
+  limit = 100,
+): Promise<RcPhoneNumber[]> {
+  const resp = await platform.get(
+    '/restapi/v1.0/account/~/extension/~/phone-number',
+    {
+      page: '1',
+      perPage: String(limit),
+    },
+  );
+  const body = (await resp.json()) as { records?: RcPhoneNumber[] };
+  return body.records ?? [];
+}
+
+async function getOrCreateConversation(
+  platform: RCPlatform,
+  memberIds: string[],
+): Promise<RcChatListItem | null> {
+  const resp = await platform.post(`${TM_BASE}/conversations`, {
+    members: memberIds.map((id) => ({ id })),
+  });
+  return (await resp.json()) as RcChatListItem;
 }
 
 // ─── Channel opts ─────────────────────────────────────────────────────────────
@@ -315,6 +802,7 @@ export interface RingCentralChannelOpts {
     clientSecret: string;
     jwt?: string;
     botToken?: string;
+    botTokensByOwnerId?: Record<string, string>;
     server?: string;
   };
 }
@@ -342,6 +830,7 @@ export class RingCentralChannel implements Channel {
   private userCache = new Map<string, string>();
   private inboundDedup = new Map<string, number>();
   private sentIds = new Map<string, number>();
+  private lastOwnerIdByChat = new Map<string, string>();
 
   private wsExt: WsExtInstance | undefined;
   private platform: RCPlatform | undefined;
@@ -369,6 +858,7 @@ export class RingCentralChannel implements Channel {
         clientSecret,
         jwt,
         botToken,
+        botTokensByOwnerId: opts.creds.botTokensByOwnerId,
         server: server ?? DEFAULT_SERVER,
       };
     } else {
@@ -380,6 +870,9 @@ export class RingCentralChannel implements Channel {
         'RC_BOT_TOKEN',
         'RC_SERVER',
       ]);
+      const ownerScopedBotTokens = extractOwnerScopedBotTokens(
+        readEnvFileByPrefix('RC_BOT_TOKEN_OWNER_'),
+      );
       if (!env.RC_CLIENT_ID || !env.RC_CLIENT_SECRET) {
         throw new Error(
           'RC_CLIENT_ID and RC_CLIENT_SECRET must be set in .env',
@@ -393,6 +886,7 @@ export class RingCentralChannel implements Channel {
         clientSecret: env.RC_CLIENT_SECRET,
         jwt: env.RC_JWT,
         botToken: env.RC_BOT_TOKEN,
+        botTokensByOwnerId: ownerScopedBotTokens,
         server: env.RC_SERVER || DEFAULT_SERVER,
       };
     }
@@ -504,8 +998,39 @@ export class RingCentralChannel implements Channel {
             );
 
       for (const chunk of chunks) {
-        const postId = await sendPost(this.platform, chatId, chunk);
-        if (postId) this.trackSent(postId);
+        const {
+          platform: sendPlatform,
+          expectedCreatorId,
+          ownerId,
+        } = await this.getSendPlatform(chatId);
+        const postId = await sendPost(sendPlatform, chatId, chunk);
+        if (postId) {
+          this.trackSent(postId);
+          const creatorId = await verifySentPostCreator(
+            sendPlatform,
+            chatId,
+            postId,
+          );
+          if (
+            expectedCreatorId &&
+            creatorId &&
+            creatorId !== expectedCreatorId
+          ) {
+            throw new Error(
+              `Bot-auth send resolved to creator ${creatorId}, expected ${expectedCreatorId}${ownerId ? ` (ownerId=${ownerId})` : ''}`,
+            );
+          }
+          logger.info(
+            {
+              jid,
+              postId,
+              creatorId,
+              connectedExtId: this.botExtId,
+              ownerId,
+            },
+            'RC sent post verification',
+          );
+        }
       }
 
       logger.info({ jid, length: text.length }, 'RC message sent');
@@ -528,6 +1053,205 @@ export class RingCentralChannel implements Channel {
     return chatRef;
   }
 
+  private findCachedChats(query: string, limit: number): RcChatSummary[] {
+    return findChatsByQuery(query, {
+      jidPrefix: this.jidPrefix,
+      limit,
+    }).map((chat) => ({
+      jid: chat.jid,
+      chatId: this.normalizeChatId(chat.jid),
+      name: chat.name || chat.jid,
+    }));
+  }
+
+  private findOpaqueCachedChats(limit: number): RcChatSummary[] {
+    return findOpaqueChatsByPrefix(this.jidPrefix, limit).map((chat) => ({
+      jid: chat.jid,
+      chatId: this.normalizeChatId(chat.jid),
+      name: chat.name || chat.jid,
+    }));
+  }
+
+  private isOpaqueChatName(name: string | undefined, chatId: string): boolean {
+    const trimmed = name?.trim();
+    if (!trimmed) return true;
+
+    const normalizedName = trimmed.toLowerCase();
+    return (
+      normalizedName === chatId.toLowerCase() ||
+      normalizedName === this.jidForChatId(chatId).toLowerCase()
+    );
+  }
+
+  private async resolveDirectChatName(
+    platform: RCPlatform,
+    chat: RcChatListItem | null,
+  ): Promise<string | undefined> {
+    if (!chat || chat.type?.toLowerCase() !== 'direct') return undefined;
+
+    const otherMemberIds = (chat.members ?? [])
+      .map((member) => member.id?.trim())
+      .filter(
+        (memberId): memberId is string =>
+          !!memberId && memberId !== this.botExtId,
+      );
+
+    if (otherMemberIds.length !== 1) return undefined;
+    return this.resolveUser(otherMemberIds[0], platform);
+  }
+
+  private async resolveChatDisplayName(
+    platform: RCPlatform,
+    chatId: string,
+    rawName?: string,
+    chatDetail?: RcChatListItem | null,
+  ): Promise<string | undefined> {
+    const initialName = rawName?.trim();
+    const initialIsOpaque = this.isOpaqueChatName(initialName, chatId);
+    const detail =
+      chatDetail ?? (initialIsOpaque ? await getChat(platform, chatId) : null);
+
+    const directChatName = await this.resolveDirectChatName(platform, detail);
+    if (directChatName) {
+      updateChatName(this.jidForChatId(chatId), directChatName);
+      return directChatName;
+    }
+
+    const detailName = detail?.name?.trim();
+    if (detailName && !this.isOpaqueChatName(detailName, chatId)) {
+      updateChatName(this.jidForChatId(chatId), detailName);
+      return detailName;
+    }
+
+    if (initialName && !initialIsOpaque) {
+      updateChatName(this.jidForChatId(chatId), initialName);
+      return initialName;
+    }
+
+    return initialName || detailName;
+  }
+
+  private async buildChatSummary(
+    platform: RCPlatform,
+    chatId: string,
+    rawName?: string,
+    chatDetail?: RcChatListItem | null,
+  ): Promise<RcChatSummary> {
+    const name =
+      (await this.resolveChatDisplayName(
+        platform,
+        chatId,
+        rawName,
+        chatDetail,
+      )) ?? this.jidForChatId(chatId);
+    return {
+      jid: this.jidForChatId(chatId),
+      chatId,
+      name,
+    };
+  }
+
+  private looksLikeChatId(chatRef: string): boolean {
+    return (
+      chatRef.startsWith('rc:') ||
+      chatRef.startsWith('rcb:') ||
+      /^\d+$/.test(chatRef.trim())
+    );
+  }
+
+  private async resolveDirectoryBackedDirectChats(
+    query: string,
+    limit: number,
+  ): Promise<RcChatSummary[]> {
+    if (!this.platform || !this.botExtId) return [];
+
+    const candidates = await searchDirectoryEntries(
+      this.platform,
+      query,
+      Math.min(Math.max(limit * 3, 10), 25),
+    );
+    const chats = new Map<string, RcChatSummary>();
+
+    for (const candidate of candidates) {
+      if (candidate.status && candidate.status !== 'Enabled') continue;
+      const candidateId = candidate.id ? String(candidate.id) : undefined;
+      if (!candidateId || candidateId === this.botExtId) continue;
+
+      const fullName = [candidate.firstName, candidate.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      try {
+        const chat = await getOrCreateConversation(this.platform, [
+          this.botExtId,
+          candidateId,
+        ]);
+        if (!chat?.id) continue;
+        const summary = await this.buildChatSummary(
+          this.platform,
+          chat.id,
+          fullName || candidate.email || chat.name,
+          chat,
+        );
+        chats.set(summary.chatId, summary);
+        if (chats.size >= limit) break;
+      } catch (err) {
+        logger.warn(
+          { err, candidateId, query },
+          'Failed to resolve RC direct conversation from directory entry',
+        );
+      }
+    }
+
+    return Array.from(chats.values());
+  }
+
+  private async searchOpaqueCachedChats(
+    query: string,
+    limit: number,
+  ): Promise<RcChatSummary[]> {
+    if (!this.platform) return [];
+
+    const matches: RcChatSummary[] = [];
+    const candidates = this.findOpaqueCachedChats(
+      Math.min(Math.max(limit * 4, 20), 50),
+    );
+
+    for (const candidate of candidates) {
+      const detail = await getChat(this.platform, candidate.chatId);
+      const hydrated = await this.buildChatSummary(
+        this.platform,
+        candidate.chatId,
+        candidate.name,
+        detail,
+      );
+      if (!matchesQuery(query, [hydrated.chatId, hydrated.name])) continue;
+      matches.push(hydrated);
+      if (matches.length >= limit) break;
+    }
+
+    return matches;
+  }
+
+  private async resolveDirectChatIdLookup(
+    query: string,
+  ): Promise<RcChatSummary | null> {
+    if (!this.platform || !this.looksLikeChatId(query)) return null;
+
+    const chatId = this.normalizeChatId(query.trim());
+    const cachedChat = this.findCachedChats(chatId, 1)[0];
+    const chat = await getChat(this.platform, chatId);
+    if (!chat?.id) return null;
+
+    return this.buildChatSummary(
+      this.platform,
+      chat.id,
+      cachedChat?.name ?? chat.name,
+      chat,
+    );
+  }
+
   async listChatsForAgent(
     query?: string,
     limit = 50,
@@ -535,27 +1259,71 @@ export class RingCentralChannel implements Channel {
     if (!this.platform) throw new Error('RC channel is not connected');
 
     const cappedLimit = Math.min(Math.max(limit, 1), 250);
-    const chats = await listChats(
-      this.platform,
-      Math.min(cappedLimit * 3, 250),
-    );
-    const normalizedQuery = query?.trim().toLowerCase();
+    const trimmedQuery = query?.trim();
+    if (trimmedQuery) {
+      if (this.looksLikeChatId(trimmedQuery)) {
+        const directIdMatch =
+          await this.resolveDirectChatIdLookup(trimmedQuery);
+        if (directIdMatch) {
+          return [directIdMatch];
+        }
+      }
 
-    return chats
-      .filter((chat) => chat.id && chat.name)
-      .map((chat) => ({
-        jid: this.jidForChatId(chat.id!),
-        chatId: chat.id!,
-        name: chat.name!,
-      }))
-      .filter((chat) => {
-        if (!normalizedQuery) return true;
-        return (
-          chat.chatId.toLowerCase().includes(normalizedQuery) ||
-          chat.name.toLowerCase().includes(normalizedQuery)
-        );
-      })
-      .slice(0, cappedLimit);
+      const cachedChats = this.findCachedChats(trimmedQuery, cappedLimit);
+      if (cachedChats.length > 0) {
+        return cachedChats.slice(0, cappedLimit);
+      }
+
+      const opaqueMatches = await this.searchOpaqueCachedChats(
+        trimmedQuery,
+        cappedLimit,
+      );
+      if (opaqueMatches.length > 0) {
+        return opaqueMatches;
+      }
+
+      const directoryMatches = await this.resolveDirectoryBackedDirectChats(
+        trimmedQuery,
+        cappedLimit,
+      );
+      if (directoryMatches.length > 0) {
+        return directoryMatches;
+      }
+    }
+
+    const chats = await listChats(this.platform, {
+      limit: cappedLimit,
+      query,
+    });
+    const teams = await listTeams(this.platform, {
+      limit: cappedLimit,
+      query,
+    });
+    const allChats = mergeChatListItems(chats, teams);
+    const normalizedQuery = query?.trim().toLowerCase();
+    const summaries: RcChatSummary[] = [];
+
+    for (const chat of allChats) {
+      if (!chat.id) continue;
+      const summary = await this.buildChatSummary(
+        this.platform,
+        chat.id,
+        chat.name,
+        chat,
+      );
+      if (
+        normalizedQuery &&
+        !matchesQuery(query, [summary.chatId, summary.name])
+      ) {
+        continue;
+      }
+      summaries.push(summary);
+      if (summaries.length >= cappedLimit) {
+        return summaries;
+      }
+    }
+
+    return summaries;
   }
 
   async readMessagesForAgent(
@@ -564,39 +1332,37 @@ export class RingCentralChannel implements Channel {
   ): Promise<RcChatTranscript> {
     if (!this.platform) throw new Error('RC channel is not connected');
 
-    const chatId = this.normalizeChatId(chatRef);
+    const cachedChat =
+      this.findCachedChats(chatRef, 1)[0] ??
+      (!this.looksLikeChatId(chatRef)
+        ? (await this.listChatsForAgent(chatRef, 1))[0]
+        : undefined);
+    const chatId = this.normalizeChatId(cachedChat?.jid ?? chatRef);
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
-    const chat = await getChat(this.platform, chatId);
-    const posts = await listPosts(this.platform, chatId, cappedLimit);
+    try {
+      return await this.readTranscriptFromPlatform(
+        await this.refreshPlatform(),
+        chatId,
+        cappedLimit,
+        cachedChat,
+      );
+    } catch (err) {
+      if (!shouldRetryRcRead(err)) {
+        throw err;
+      }
 
-    const messages = await Promise.all(
-      posts.map(async (post) => {
-        const creatorId = post.creatorId ?? '';
-        const creatorName =
-          creatorId && creatorId === this.botExtId
-            ? ASSISTANT_NAME
-            : ((creatorId ? await this.resolveUser(creatorId) : undefined) ??
-              creatorId ??
-              'unknown');
-
-        return {
-          id: post.id ?? '',
-          text: post.text ?? '',
-          creatorId,
-          creatorName,
-          createdAt: post.creationTime
-            ? new Date(post.creationTime).toISOString()
-            : new Date().toISOString(),
-        };
-      }),
-    );
-
-    return {
-      jid: this.jidForChatId(chatId),
-      chatId,
-      name: chat?.name ?? this.jidForChatId(chatId),
-      messages: messages.reverse(),
-    };
+      logger.warn(
+        { chatId, err },
+        'RC read failed on fresh platform, retrying once more with fresh auth',
+      );
+      const refreshedPlatform = await this.refreshPlatform();
+      return this.readTranscriptFromPlatform(
+        refreshedPlatform,
+        chatId,
+        cappedLimit,
+        cachedChat,
+      );
+    }
   }
 
   async sendMessageForAgent(
@@ -606,8 +1372,35 @@ export class RingCentralChannel implements Channel {
     if (!this.platform) throw new Error('RC channel is not connected');
 
     const chatId = this.normalizeChatId(chatRef);
-    const postId = await sendPost(this.platform, chatId, text);
-    if (postId) this.trackSent(postId);
+    const {
+      platform: sendPlatform,
+      expectedCreatorId,
+      ownerId,
+    } = await this.getSendPlatform(chatId);
+    const postId = await sendPost(sendPlatform, chatId, text);
+    if (postId) {
+      this.trackSent(postId);
+      const creatorId = await verifySentPostCreator(
+        sendPlatform,
+        chatId,
+        postId,
+      );
+      if (expectedCreatorId && creatorId && creatorId !== expectedCreatorId) {
+        throw new Error(
+          `Bot-auth send resolved to creator ${creatorId}, expected ${expectedCreatorId}${ownerId ? ` (ownerId=${ownerId})` : ''}`,
+        );
+      }
+      logger.info(
+        {
+          jid: this.jidForChatId(chatId),
+          postId,
+          creatorId,
+          connectedExtId: this.botExtId,
+          ownerId,
+        },
+        'RC sent post verification',
+      );
+    }
 
     logger.info(
       { jid: this.jidForChatId(chatId), length: text.length },
@@ -619,6 +1412,98 @@ export class RingCentralChannel implements Channel {
       chatId,
       postId,
     };
+  }
+
+  async listChatMembersForAgent(
+    chatRef: string,
+    limit = 100,
+  ): Promise<RcChatMember[]> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const chatId = this.normalizeChatId(chatRef);
+    const cappedLimit = Math.min(Math.max(limit, 1), 250);
+    return listChatMembers(this.platform, chatId, cappedLimit);
+  }
+
+  async getPresenceForAgent(extensionId?: string): Promise<RcPresence> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+    return getPresence(this.platform, extensionId || '~');
+  }
+
+  async setPresenceForAgent(
+    update: RcPresenceUpdateInput,
+  ): Promise<RcPresence> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+    return setPresence(this.platform, update);
+  }
+
+  async getExtensionForAgent(
+    extensionId?: string,
+  ): Promise<RcExtensionSummary> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+    return getExtension(this.platform, extensionId || '~');
+  }
+
+  async listExtensionsForAgent(
+    query?: string,
+    limit = 50,
+  ): Promise<RcExtensionSummary[]> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    const extensions = await listExtensions(
+      this.platform,
+      Math.min(cappedLimit * 3, 100),
+    );
+
+    return extensions
+      .filter((extension) =>
+        matchesQuery(query, [
+          extension.id ? String(extension.id) : undefined,
+          extension.extensionNumber,
+          extension.name,
+          extension.email,
+          extension.contact?.firstName,
+          extension.contact?.lastName,
+          extension.contact?.email,
+        ]),
+      )
+      .slice(0, cappedLimit);
+  }
+
+  async listContactsForAgent(query?: string, limit = 50): Promise<RcContact[]> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    const contacts = await listContacts(
+      this.platform,
+      Math.min(cappedLimit * 3, 100),
+    );
+
+    return contacts
+      .filter((contact) =>
+        matchesQuery(query, [
+          contact.id,
+          contact.firstName,
+          contact.lastName,
+          contact.email,
+          contact.company,
+          contact.jobTitle,
+        ]),
+      )
+      .slice(0, cappedLimit);
+  }
+
+  async createContactForAgent(contact: RcContactInput): Promise<RcContact> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+    return createContact(this.platform, contact);
+  }
+
+  async listPhoneNumbersForAgent(limit = 50): Promise<RcPhoneNumber[]> {
+    if (!this.platform) throw new Error('RC channel is not connected');
+
+    const cappedLimit = Math.min(Math.max(limit, 1), 100);
+    return listPhoneNumbers(this.platform, cappedLimit);
   }
 
   // ─── Inbound ─────────────────────────────────────────────────────────────────
@@ -633,11 +1518,17 @@ export class RingCentralChannel implements Channel {
     const postId = body.id as string | undefined;
     const chatId = body.groupId as string | undefined;
     const creatorId = body.creatorId as string | undefined;
+    const ownerIdValue =
+      (event as { ownerId?: string | number })?.ownerId ??
+      (body.ownerId as string | number | undefined);
     const timestamp = body.creationTime
       ? new Date(body.creationTime as string).toISOString()
       : new Date().toISOString();
 
     if (!chatId) return;
+    if (ownerIdValue !== undefined && ownerIdValue !== null) {
+      this.lastOwnerIdByChat.set(chatId, String(ownerIdValue));
+    }
     if (postId && this.isDup(postId)) return;
     if (postId && this.isOwn(postId)) return;
 
@@ -683,12 +1574,10 @@ export class RingCentralChannel implements Channel {
       // The JWT/user channel sees all RC events and must not register them.
       if (!isBotMsg && this.opts.autoRegister) {
         if (!isGroupMention) {
-          // Someone DM'd the bot extension directly. This bot is personal and
-          // only participates in team chats. Reply and drop the message.
-          await this.sendMessage(
-            jid,
-            "This is Nasen's personal mate, not accepting DMs.",
-          );
+          // Ignore unknown RC chats unless the bot is explicitly @mentioned.
+          // Auto-replying here is too risky because unregistered team chats can
+          // surface without a bot mention, which would spam the conversation.
+          logger.info({ jid, chatId }, 'Ignoring unknown RC chat without mention');
           return;
         }
         const group = autoRegisterContact(
@@ -735,11 +1624,24 @@ export class RingCentralChannel implements Channel {
     if (!this.platform) return;
     try {
       logger.info('Syncing RC chat metadata...');
-      const chats = await listChats(this.platform);
+      const chats = await listChats(this.platform, {
+        limit: 250,
+        suppressErrors: true,
+      });
       let count = 0;
       for (const chat of chats) {
         if (chat.id && chat.name) {
           updateChatName(`${this.jidPrefix}${chat.id}`, chat.name);
+          count++;
+        }
+      }
+      const teams = await listTeams(this.platform, {
+        limit: 250,
+        suppressErrors: true,
+      });
+      for (const team of teams) {
+        if (team.id && team.name) {
+          updateChatName(`${this.jidPrefix}${team.id}`, team.name);
           count++;
         }
       }
@@ -754,12 +1656,25 @@ export class RingCentralChannel implements Channel {
   private trackSent(postId: string): void {
     const now = Date.now();
     this.sentIds.set(postId, now + SENT_TTL);
+    globalSentPostIds.set(postId, now + SENT_TTL);
     for (const [id, exp] of this.sentIds) {
       if (now > exp) this.sentIds.delete(id);
+    }
+    for (const [id, exp] of globalSentPostIds) {
+      if (now > exp) globalSentPostIds.delete(id);
     }
   }
 
   private isOwn(postId: string): boolean {
+    const globalExp = globalSentPostIds.get(postId);
+    if (globalExp !== undefined) {
+      if (Date.now() > globalExp) {
+        globalSentPostIds.delete(postId);
+      } else {
+        return true;
+      }
+    }
+
     const exp = this.sentIds.get(postId);
     if (exp === undefined) return false;
     if (Date.now() > exp) {
@@ -780,16 +1695,109 @@ export class RingCentralChannel implements Channel {
     return false;
   }
 
-  private async resolveUser(userId: string): Promise<string | undefined> {
+  private async resolveUser(
+    userId: string,
+    platformOverride?: RCPlatform,
+  ): Promise<string | undefined> {
     const cached = this.userCache.get(userId);
     if (cached) return cached;
-    if (!this.platform) return undefined;
-    const user = await fetchUser(this.platform, userId);
+    const platform = platformOverride ?? this.platform;
+    if (!platform) return undefined;
+    const user = await fetchUser(platform, userId);
     const name =
       [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
       user?.email;
     if (name) this.userCache.set(userId, name);
     return name;
+  }
+
+  private async readTranscriptFromPlatform(
+    platform: RCPlatform,
+    chatId: string,
+    limit: number,
+    cachedChat?: RcChatSummary,
+  ): Promise<RcChatTranscript> {
+    this.platform = platform;
+    const chat = await getChat(platform, chatId);
+    const team = chat?.name ? null : await getTeam(platform, chatId);
+    const posts = await listPosts(platform, chatId, limit);
+
+    const messages = await Promise.all(
+      posts.map(async (post) => {
+        const creatorId = post.creatorId ?? '';
+        const creatorName =
+          creatorId && creatorId === this.botExtId
+            ? ASSISTANT_NAME
+            : ((creatorId
+                ? await this.resolveUser(creatorId, platform)
+                : undefined) ??
+              creatorId ??
+              'unknown');
+
+        return {
+          id: post.id ?? '',
+          text: post.text ?? '',
+          creatorId,
+          creatorName,
+          createdAt: post.creationTime
+            ? new Date(post.creationTime).toISOString()
+            : new Date().toISOString(),
+        };
+      }),
+    );
+
+    return {
+      jid: this.jidForChatId(chatId),
+      chatId,
+      name:
+        (await this.resolveChatDisplayName(
+          platform,
+          chatId,
+          cachedChat?.name ?? chat?.name ?? team?.name,
+          chat,
+        )) ?? this.jidForChatId(chatId),
+      messages: messages.reverse(),
+    };
+  }
+
+  private async refreshPlatform(): Promise<RCPlatform> {
+    const { platform } = await createAuthenticatedSdk(this.creds);
+    return platform;
+  }
+
+  private async getSendPlatform(chatId: string): Promise<{
+    platform: RCPlatform;
+    expectedCreatorId?: string;
+    ownerId?: string;
+  }> {
+    if (!this.creds.botToken) {
+      if (!this.platform) throw new Error('RC channel is not connected');
+      return {
+        platform: this.platform,
+        expectedCreatorId: this.botExtId,
+      };
+    }
+
+    const ownerId = this.lastOwnerIdByChat.get(chatId);
+    const ownerScopedToken =
+      ownerId && this.creds.botTokensByOwnerId
+        ? this.creds.botTokensByOwnerId[ownerId]
+        : undefined;
+    const sendCreds =
+      ownerScopedToken && ownerScopedToken !== this.creds.botToken
+        ? {
+            ...this.creds,
+            botToken: ownerScopedToken,
+          }
+        : this.creds;
+
+    return {
+      platform: await createAuthenticatedSdk(sendCreds).then(
+        ({ platform }) => platform,
+      ),
+      expectedCreatorId: this.botExtId,
+      ownerId,
+    };
   }
 
   private async flushOutgoingQueue(): Promise<void> {
@@ -801,8 +1809,39 @@ export class RingCentralChannel implements Channel {
         const item = this.outgoingQueue.shift()!;
         const chatId = item.jid.slice(this.jidPrefix.length);
         if (this.platform) {
-          const postId = await sendPost(this.platform, chatId, item.text);
-          if (postId) this.trackSent(postId);
+          const {
+            platform: sendPlatform,
+            expectedCreatorId,
+            ownerId,
+          } = await this.getSendPlatform(chatId);
+          const postId = await sendPost(sendPlatform, chatId, item.text);
+          if (postId) {
+            this.trackSent(postId);
+            const creatorId = await verifySentPostCreator(
+              sendPlatform,
+              chatId,
+              postId,
+            );
+            if (
+              expectedCreatorId &&
+              creatorId &&
+              creatorId !== expectedCreatorId
+            ) {
+              throw new Error(
+                `Bot-auth send resolved to creator ${creatorId}, expected ${expectedCreatorId}${ownerId ? ` (ownerId=${ownerId})` : ''}`,
+              );
+            }
+            logger.info(
+              {
+                jid: item.jid,
+                postId,
+                creatorId,
+                connectedExtId: this.botExtId,
+                ownerId,
+              },
+              'RC sent post verification',
+            );
+          }
         }
         logger.info({ jid: item.jid }, 'Queued RC message sent');
       }

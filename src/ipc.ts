@@ -12,7 +12,17 @@ import {
   NotebookLmSourceInput,
 } from './notebooklm.js';
 import { RcDeliveryMode, RegisteredGroup } from './types.js';
-import { RcChatSummary, RcChatTranscript } from './channels/ringcentral.js';
+import {
+  RcChatMember,
+  RcChatSummary,
+  RcChatTranscript,
+  RcContact,
+  RcContactInput,
+  RcExtensionSummary,
+  RcPhoneNumber,
+  RcPresence,
+  RcPresenceUpdateInput,
+} from './channels/ringcentral.js';
 
 export { processTaskIpc } from './ipc-task-handler.js';
 
@@ -47,6 +57,41 @@ export interface IpcDeps {
     text: string,
     mode: RcDeliveryMode,
   ) => Promise<{ jid: string; chatId: string; postId?: string }>;
+  rcListChatMembers: (
+    chatRef: string,
+    mode: RcDeliveryMode,
+    limit?: number,
+  ) => Promise<RcChatMember[]>;
+  rcGetPresence: (
+    mode: RcDeliveryMode,
+    extensionId?: string,
+  ) => Promise<RcPresence>;
+  rcSetPresence: (
+    mode: RcDeliveryMode,
+    update: RcPresenceUpdateInput,
+  ) => Promise<RcPresence>;
+  rcGetExtension: (
+    mode: RcDeliveryMode,
+    extensionId?: string,
+  ) => Promise<RcExtensionSummary>;
+  rcListExtensions: (
+    mode: RcDeliveryMode,
+    query?: string,
+    limit?: number,
+  ) => Promise<RcExtensionSummary[]>;
+  rcListContacts: (
+    mode: RcDeliveryMode,
+    query?: string,
+    limit?: number,
+  ) => Promise<RcContact[]>;
+  rcCreateContact: (
+    mode: RcDeliveryMode,
+    contact: RcContactInput,
+  ) => Promise<RcContact>;
+  rcListPhoneNumbers: (
+    mode: RcDeliveryMode,
+    limit?: number,
+  ) => Promise<RcPhoneNumber[]>;
   notebookLmListNotebooks: (limit?: number) => Promise<NotebookLmNotebook[]>;
   notebookLmCreateNotebook: (title: string) => Promise<NotebookLmNotebook>;
   notebookLmGetNotebook: (notebookId: string) => Promise<NotebookLmNotebook>;

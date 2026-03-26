@@ -27,6 +27,17 @@ interface RunGroupAgentDeps {
   getRegisteredJids: () => Set<string>;
 }
 
+export function shouldCloseContainerAfterTurn(
+  group: RegisteredGroup,
+  result: ContainerOutput,
+): boolean {
+  return (
+    group.folder === 'rc-personal' &&
+    result.status === 'success' &&
+    result.result === null
+  );
+}
+
 export async function runGroupAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -177,11 +188,13 @@ export async function processGroupMessages(
       : '';
 
   const usePersonalRcDelivery =
-    group.folder === 'rc-personal' ||
+    group.folder !== 'rc-personal' &&
     shouldUsePersonalRcDelivery(chatJid, missedMessages);
   const rcRoutingPrefix =
     chatJid.startsWith('rc:') || chatJid.startsWith('rcb:')
-      ? usePersonalRcDelivery
+      ? group.folder === 'rc-personal'
+        ? '[RingCentral routing: For this chat, send_message should use delivery_mode="bot". Do not use personal delivery_mode in this session.]\n\n'
+        : usePersonalRcDelivery
         ? '[RingCentral routing: The latest user request asks you to act on Nasen\'s behalf. For outbound actions in this chat, prefer send_message with delivery_mode="personal".]\n\n'
         : '[RingCentral routing: send_message supports delivery_mode="personal" for Nasen\'s personal RC app and delivery_mode="bot" for the bot app. Use personal when the user explicitly asks you to act as Nasen or use his personal RC account.]\n\n'
       : '';
@@ -249,11 +262,15 @@ export async function processGroupMessages(
         resetIdleTimer();
       }
 
-      if (result.status === 'error') {
-        hadError = true;
-      }
-    },
-  );
+        if (result.status === 'error') {
+          hadError = true;
+        }
+
+        if (shouldCloseContainerAfterTurn(group, result)) {
+          deps.queue.closeStdin(chatJid);
+        }
+      },
+    );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);

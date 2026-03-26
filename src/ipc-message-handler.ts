@@ -12,15 +12,6 @@ interface MessageIpcDeps {
   ) => Promise<void>;
 }
 
-function forcePersonalRcJidForPersonalGroup(
-  sourceGroup: string,
-  chatJid: string,
-): string {
-  if (sourceGroup !== 'rc-personal') return chatJid;
-  if (!chatJid.startsWith('rcb:')) return chatJid;
-  return `rc:${chatJid.slice(4)}`;
-}
-
 export async function processMessageFiles(
   messagesDir: string,
   sourceGroup: string,
@@ -48,23 +39,16 @@ export async function processMessageFiles(
       if (data.type === 'message' && data.chatJid && data.text) {
         const targetGroup = registeredGroups[data.chatJid];
         if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-          const effectiveChatJid = forcePersonalRcJidForPersonalGroup(
-            sourceGroup,
-            data.chatJid,
-          );
           const effectiveDeliveryMode =
-            sourceGroup === 'rc-personal' &&
-            (data.deliveryMode === undefined || data.deliveryMode === 'auto')
-              ? 'personal'
-              : data.deliveryMode || 'auto';
+            sourceGroup === 'rc-personal' ? 'bot' : data.deliveryMode || 'auto';
           await deps.sendMessage(
-            effectiveChatJid,
+            data.chatJid,
             data.text,
             effectiveDeliveryMode,
           );
           logger.info(
             {
-              chatJid: effectiveChatJid,
+              chatJid: data.chatJid,
               sourceGroup,
               deliveryMode: effectiveDeliveryMode,
             },

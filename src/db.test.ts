@@ -4,6 +4,7 @@ import {
   _initTestDatabase,
   createTask,
   deleteTask,
+  findChatsByQuery,
   getAllChats,
   getAllRegisteredGroups,
   getMessagesSince,
@@ -328,6 +329,40 @@ describe('storeChatMetadata', () => {
     storeChatMetadata('group@g.us', '2024-01-01T00:00:01.000Z');
     const chats = getAllChats();
     expect(chats[0].last_message_time).toBe('2024-01-01T00:00:05.000Z');
+  });
+});
+
+describe('findChatsByQuery', () => {
+  it('finds cached RC chats by bare chat id', () => {
+    storeChatMetadata(
+      'rc:140855713798',
+      '2024-01-01T00:00:00.000Z',
+      'Jupiter + NC CI Status',
+    );
+
+    const chats = findChatsByQuery('140855713798', {
+      jidPrefix: 'rc:',
+      limit: 10,
+    });
+
+    expect(chats).toHaveLength(1);
+    expect(chats[0].jid).toBe('rc:140855713798');
+  });
+
+  it('finds cached RC chats by team name', () => {
+    storeChatMetadata(
+      'rc:140855713798',
+      '2024-01-01T00:00:00.000Z',
+      'Jupiter + NC CI Status',
+    );
+
+    const chats = findChatsByQuery('Jupiter + NC CI Status', {
+      jidPrefix: 'rc:',
+      limit: 10,
+    });
+
+    expect(chats).toHaveLength(1);
+    expect(chats[0].name).toBe('Jupiter + NC CI Status');
   });
 });
 

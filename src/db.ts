@@ -146,6 +146,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
 
   // Migrate from JSON files if they exist
@@ -155,6 +156,7 @@ export function initDatabase(): void {
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
+  db.pragma('busy_timeout = 5000');
   createSchema(db);
 }
 
@@ -233,6 +235,89 @@ export function getAllChats(): ChatInfo[] {
   `,
     )
     .all() as ChatInfo[];
+}
+
+export function findChatsByQuery(
+  query: string,
+  options: {
+    jidPrefix?: string;
+    limit?: number;
+  } = {},
+): ChatInfo[] {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return [];
+
+  const normalizedQuery = trimmedQuery.toLowerCase();
+  const normalizedPrefix = (options.jidPrefix ?? '').toLowerCase();
+  const exactPrefixedJid =
+    normalizedPrefix && !normalizedQuery.startsWith(normalizedPrefix)
+      ? `${normalizedPrefix}${normalizedQuery}`
+      : normalizedQuery;
+  const likeQuery = `%${normalizedQuery}%`;
+  const jidLike = normalizedPrefix ? `${normalizedPrefix}%` : '%';
+  const limit = Math.max(options.limit ?? 20, 1);
+
+  return db
+    .prepare(
+      `
+      SELECT jid, name, last_message_time, channel, is_group
+      FROM chats
+      WHERE jid LIKE ?
+        AND (
+          lower(jid) = ?
+          OR lower(jid) = ?
+          OR lower(name) = ?
+          OR lower(jid) LIKE ?
+          OR lower(name) LIKE ?
+        )
+      ORDER BY
+        CASE
+          WHEN lower(jid) = ? THEN 0
+          WHEN lower(jid) = ? THEN 1
+          WHEN lower(name) = ? THEN 2
+          WHEN lower(jid) LIKE ? THEN 3
+          WHEN lower(name) LIKE ? THEN 4
+          ELSE 5
+        END,
+        last_message_time DESC
+      LIMIT ?
+    `,
+    )
+    .all(
+      jidLike,
+      normalizedQuery,
+      exactPrefixedJid,
+      normalizedQuery,
+      likeQuery,
+      likeQuery,
+      normalizedQuery,
+      exactPrefixedJid,
+      normalizedQuery,
+      likeQuery,
+      likeQuery,
+      limit,
+    ) as ChatInfo[];
+}
+
+export function findOpaqueChatsByPrefix(
+  jidPrefix: string,
+  limit = 50,
+): ChatInfo[] {
+  const normalizedPrefix = jidPrefix.trim().toLowerCase();
+  const cappedLimit = Math.max(limit, 1);
+
+  return db
+    .prepare(
+      `
+      SELECT jid, name, last_message_time, channel, is_group
+      FROM chats
+      WHERE lower(jid) LIKE ?
+        AND lower(name) = lower(jid)
+      ORDER BY last_message_time DESC
+      LIMIT ?
+    `,
+    )
+    .all(`${normalizedPrefix}%`, cappedLimit) as ChatInfo[];
 }
 
 /**

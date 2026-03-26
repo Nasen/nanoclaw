@@ -2,8 +2,8 @@
  * RC Group Chat Auto-Registration
  *
  * Auto-registers unknown RC group/team chats when the bot is @mentioned.
- * DMs to the bot extension are silently rejected — this bot is personal and
- * only participates in team chats where Nasen is already present.
+ * Unknown chats without a bot @mention are ignored so NanoClaw never posts
+ * unsolicited rejection messages into team conversations.
  *
  * Folder: rc-grp-{chatId}  (stable regardless of who @mentions)
  * requiresTrigger: true    (only @Bob mentions trigger a response)
@@ -128,8 +128,8 @@ Wrap internal reasoning in \`<internal>\` tags — not sent to the user.
 
 /**
  * Auto-register an unknown RC group/team chat on first @mention.
- * DMs are rejected unconditionally — only team chats where Nasen is present
- * are supported.
+ * Only team chats with an explicit bot @mention are auto-registered.
+ * Unknown chats without a mention are ignored by the caller.
  *
  * @param jid             Full JID (e.g. rcb:12345)
  * @param senderName      Resolved display name of the message sender

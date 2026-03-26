@@ -43,13 +43,23 @@ function shouldSkipGroupMessages(
   return !hasAllowedTrigger(chatJid, groupMessages, allowlistCfg);
 }
 
+export function shouldPipeMessagesToActiveContainer(
+  group: RegisteredGroup,
+): boolean {
+  return group.folder !== 'rc-personal';
+}
+
 function pipeOrEnqueueMessages(
   deps: MessageLoopDeps,
+  group: RegisteredGroup,
   chatJid: string,
   messagesToSend: NewMessage[],
 ): void {
   const formatted = formatMessages(messagesToSend, TIMEZONE);
-  if (deps.queue.sendMessage(chatJid, formatted)) {
+  if (
+    shouldPipeMessagesToActiveContainer(group) &&
+    deps.queue.sendMessage(chatJid, formatted)
+  ) {
     logger.debug(
       { chatJid, count: messagesToSend.length },
       'Piped messages to active container',
@@ -102,7 +112,7 @@ async function processPollingCycle(deps: MessageLoopDeps): Promise<void> {
       ASSISTANT_NAME,
     );
     const messagesToSend = allPending.length > 0 ? allPending : groupMessages;
-    pipeOrEnqueueMessages(deps, chatJid, messagesToSend);
+    pipeOrEnqueueMessages(deps, group, chatJid, messagesToSend);
   }
 }
 

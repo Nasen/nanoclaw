@@ -9,7 +9,6 @@ import path from 'path';
 import {
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
-  IDLE_TIMEOUT,
 } from './config.js';
 import { buildContainerArgs, buildVolumeMounts } from './container-config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -41,6 +40,20 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+}
+
+const DEFAULT_RC_PERSONAL_CONTAINER_TIMEOUT_MS = 4 * 60 * 1000;
+
+function resolveContainerTimeoutMs(group: RegisteredGroup): number {
+  if (group.containerConfig?.timeout) {
+    return group.containerConfig.timeout;
+  }
+
+  if (group.folder === 'rc-personal') {
+    return DEFAULT_RC_PERSONAL_CONTAINER_TIMEOUT_MS;
+  }
+
+  return CONTAINER_TIMEOUT;
 }
 
 export async function runContainerAgent(
@@ -185,10 +198,7 @@ export async function runContainerAgent(
 
     let timedOut = false;
     let hadStreamingOutput = false;
-    const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
-    const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+    const timeoutMs = resolveContainerTimeoutMs(group);
 
     const killOnTimeout = () => {
       timedOut = true;
@@ -261,7 +271,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Container timed out after ${configTimeout}ms`,
+          error: `Container timed out after ${timeoutMs}ms`,
         });
         return;
       }

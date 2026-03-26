@@ -2,8 +2,15 @@ import { Server } from 'http';
 import { ChildProcess } from 'child_process';
 
 import {
+  RcChatMember,
   RcChatSummary,
   RcChatTranscript,
+  RcContact,
+  RcContactInput,
+  RcExtensionSummary,
+  RcPhoneNumber,
+  RcPresence,
+  RcPresenceUpdateInput,
   RingCentralChannel,
 } from './channels/ringcentral.js';
 import { writeGroupsSnapshot } from './container-runner.js';
@@ -40,13 +47,46 @@ function getRcChannel(
   return channel;
 }
 
+function getAlternateRcMode(mode: RcDeliveryMode): RcDeliveryMode | null {
+  if (mode === 'personal') return 'bot';
+  if (mode === 'bot') return 'personal';
+  return null;
+}
+
+function shouldRetryRcOnAlternateChannel(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    /request rate exceeded/i.test(message) ||
+    /\b404\b/.test(message) ||
+    /not found/i.test(message) ||
+    /\b429\b/.test(message) ||
+    /too many requests/i.test(message)
+  );
+}
+
 export async function listRcChats(
   channels: Channel[],
   mode: RcDeliveryMode,
   query?: string,
   limit?: number,
 ): Promise<RcChatSummary[]> {
-  return getRcChannel(channels, mode).listChatsForAgent(query, limit);
+  try {
+    return await getRcChannel(channels, mode).listChatsForAgent(query, limit);
+  } catch (err) {
+    const alternateMode = getAlternateRcMode(mode);
+    if (!alternateMode || !shouldRetryRcOnAlternateChannel(err)) {
+      throw err;
+    }
+
+    logger.warn(
+      { mode, alternateMode, query, err },
+      'RC list chats failed on primary channel, retrying on alternate channel',
+    );
+    return getRcChannel(channels, alternateMode).listChatsForAgent(
+      query,
+      limit,
+    );
+  }
 }
 
 export async function readRcMessages(
@@ -55,7 +95,26 @@ export async function readRcMessages(
   mode: RcDeliveryMode,
   limit?: number,
 ): Promise<RcChatTranscript> {
-  return getRcChannel(channels, mode).readMessagesForAgent(chatRef, limit);
+  try {
+    return await getRcChannel(channels, mode).readMessagesForAgent(
+      chatRef,
+      limit,
+    );
+  } catch (err) {
+    const alternateMode = getAlternateRcMode(mode);
+    if (!alternateMode || !shouldRetryRcOnAlternateChannel(err)) {
+      throw err;
+    }
+
+    logger.warn(
+      { mode, alternateMode, chatRef, err },
+      'RC read messages failed on primary channel, retrying on alternate channel',
+    );
+    return getRcChannel(channels, alternateMode).readMessagesForAgent(
+      chatRef,
+      limit,
+    );
+  }
 }
 
 export async function sendRcMessage(
@@ -65,6 +124,73 @@ export async function sendRcMessage(
   mode: RcDeliveryMode,
 ): Promise<{ jid: string; chatId: string; postId?: string }> {
   return getRcChannel(channels, mode).sendMessageForAgent(chatRef, text);
+}
+
+export async function listRcChatMembers(
+  channels: Channel[],
+  chatRef: string,
+  mode: RcDeliveryMode,
+  limit?: number,
+): Promise<RcChatMember[]> {
+  return getRcChannel(channels, mode).listChatMembersForAgent(chatRef, limit);
+}
+
+export async function getRcPresence(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  extensionId?: string,
+): Promise<RcPresence> {
+  return getRcChannel(channels, mode).getPresenceForAgent(extensionId);
+}
+
+export async function setRcPresence(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  update: RcPresenceUpdateInput,
+): Promise<RcPresence> {
+  return getRcChannel(channels, mode).setPresenceForAgent(update);
+}
+
+export async function getRcExtension(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  extensionId?: string,
+): Promise<RcExtensionSummary> {
+  return getRcChannel(channels, mode).getExtensionForAgent(extensionId);
+}
+
+export async function listRcExtensions(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  query?: string,
+  limit?: number,
+): Promise<RcExtensionSummary[]> {
+  return getRcChannel(channels, mode).listExtensionsForAgent(query, limit);
+}
+
+export async function listRcContacts(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  query?: string,
+  limit?: number,
+): Promise<RcContact[]> {
+  return getRcChannel(channels, mode).listContactsForAgent(query, limit);
+}
+
+export async function createRcContact(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  contact: RcContactInput,
+): Promise<RcContact> {
+  return getRcChannel(channels, mode).createContactForAgent(contact);
+}
+
+export async function listRcPhoneNumbers(
+  channels: Channel[],
+  mode: RcDeliveryMode,
+  limit?: number,
+): Promise<RcPhoneNumber[]> {
+  return getRcChannel(channels, mode).listPhoneNumbersForAgent(limit);
 }
 
 export async function sendFormattedMessage(
@@ -171,6 +297,21 @@ export function startSubsystems({
       readRcMessages(channels, chatRef, mode, limit),
     rcSendMessage: (chatRef, text, mode) =>
       sendRcMessage(channels, chatRef, text, mode),
+    rcListChatMembers: (chatRef, mode, limit) =>
+      listRcChatMembers(channels, chatRef, mode, limit),
+    rcGetPresence: (mode, extensionId) =>
+      getRcPresence(channels, mode, extensionId),
+    rcSetPresence: (mode, update) => setRcPresence(channels, mode, update),
+    rcGetExtension: (mode, extensionId) =>
+      getRcExtension(channels, mode, extensionId),
+    rcListExtensions: (mode, query, limit) =>
+      listRcExtensions(channels, mode, query, limit),
+    rcListContacts: (mode, query, limit) =>
+      listRcContacts(channels, mode, query, limit),
+    rcCreateContact: (mode, contact) =>
+      createRcContact(channels, mode, contact),
+    rcListPhoneNumbers: (mode, limit) =>
+      listRcPhoneNumbers(channels, mode, limit),
     notebookLmListNotebooks: (limit) =>
       createNotebookLmClient().listNotebooks(limit),
     notebookLmCreateNotebook: (title) =>
