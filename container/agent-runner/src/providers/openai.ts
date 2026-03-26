@@ -7,17 +7,18 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 
-import {
-  AgentProvider,
-  AgentTurnContext,
-  AgentTurnResult,
-} from '../types.js';
+import { AgentProvider, AgentTurnContext, AgentTurnResult } from '../types.js';
 import {
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
   shouldDropAssistantHistory,
 } from './openai-utils.js';
+import {
+  DEFAULT_MCP_STARTUP_TIMEOUT_MS,
+  getOpenAiMcpServerConfigs,
+} from './mcp-registry.js';
 
 interface OpenAIHistoryTurn {
   role: 'user' | 'assistant';
@@ -48,16 +49,12 @@ interface McpToolBinding {
   mcpName: string;
 }
 
-interface McpServerConfig {
-  serverName: string;
-  transport: 'stdio' | 'streamable-http';
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  url?: string;
-  requestInit?: RequestInit;
-  startupTimeoutMs?: number;
+interface McpListedTool {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  execution?: { taskSupport?: string };
 }
 
 const OPENAI_STATE_DIR = '/home/node/.nanoclaw/openai';
@@ -65,12 +62,13 @@ const DEFAULT_OPENAI_MODEL = 'gpt-5-mini';
 const DEFAULT_SHELL_TIMEOUT_MS = 120_000;
 const MAX_TOOL_LOOPS = 16;
 const MAX_TOOL_OUTPUT_CHARS = 120_000;
+const MAX_OPENAI_EXTERNAL_MCP_TOOLS = 5;
+const MAX_OPENAI_HISTORY_TURNS = 24;
+const MAX_OPENAI_HISTORY_CHARS = 24_000;
+const MAX_OPENAI_RESPONSE_RETRIES = 2;
+const OPENAI_RETRY_DELAY_MS = 1500;
 const execFileAsync = promisify(execFile);
 const DEFAULT_WEB_TIMEOUT_MS = 45_000;
-const HAS_M365_MCP =
-  fs.existsSync('/usr/local/bin/m365-mcp') || fs.existsSync('/usr/bin/m365-mcp');
-const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 15_000;
-const SLOW_MCP_STARTUP_TIMEOUT_MS = 180_000;
 
 function ensureStateDir(): void {
   fs.mkdirSync(OPENAI_STATE_DIR, { recursive: true });
@@ -86,15 +84,59 @@ function loadSessionState(sessionId: string): OpenAISessionState {
   if (!fs.existsSync(filePath)) return { history: [] };
 
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as OpenAISessionState;
+    const state = JSON.parse(
+      fs.readFileSync(filePath, 'utf-8'),
+    ) as OpenAISessionState;
+    const trimmedHistory = trimSessionHistory(state.history || []);
+    if (trimmedHistory.length !== (state.history || []).length) {
+      fs.writeFileSync(
+        filePath,
+        `${JSON.stringify({ history: trimmedHistory }, null, 2)}\n`,
+      );
+    }
+    return { history: trimmedHistory };
   } catch {
     return { history: [] };
   }
 }
 
+function trimSessionHistory(history: OpenAIHistoryTurn[]): OpenAIHistoryTurn[] {
+  if (history.length <= MAX_OPENAI_HISTORY_TURNS) {
+    const totalChars = history.reduce(
+      (sum, turn) => sum + turn.content.length,
+      0,
+    );
+    if (totalChars <= MAX_OPENAI_HISTORY_CHARS) return history;
+  }
+
+  const trimmed: OpenAIHistoryTurn[] = [];
+  let totalChars = 0;
+
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    const nextChars = totalChars + turn.content.length;
+    if (
+      trimmed.length >= MAX_OPENAI_HISTORY_TURNS ||
+      (trimmed.length > 0 && nextChars > MAX_OPENAI_HISTORY_CHARS)
+    ) {
+      break;
+    }
+    trimmed.push(turn);
+    totalChars = nextChars;
+  }
+
+  return trimmed.reverse();
+}
+
 function saveSessionState(sessionId: string, state: OpenAISessionState): void {
   ensureStateDir();
-  fs.writeFileSync(getStateFile(sessionId), `${JSON.stringify(state, null, 2)}\n`);
+  const normalizedState: OpenAISessionState = {
+    history: trimSessionHistory(state.history || []),
+  };
+  fs.writeFileSync(
+    getStateFile(sessionId),
+    `${JSON.stringify(normalizedState, null, 2)}\n`,
+  );
 }
 
 function loadGlobalContext(isMain: boolean): string {
@@ -121,6 +163,36 @@ function loadAdditionalDirectoriesSummary(): string {
     .join('\n')}`;
 }
 
+function shouldSkipHistoryForRcLookup(
+  prompt: string,
+  rcChat: boolean,
+): boolean {
+  if (!rcChat) return false;
+
+  return (
+    /!\[:(?:Team|Person)\]\(\d+\)/.test(prompt) ||
+    /\b(?:summarize|show|read|get|latest)\b[\s\S]{0,120}\b(?:message|messages)\b[\s\S]{0,120}\b(?:from|with)\b/i.test(
+      prompt,
+    ) ||
+    /\brc[b]?:\d+\b/i.test(prompt)
+  );
+}
+
+function extractExplicitRcTarget(prompt: string): string | null {
+  const mentionMatch = prompt.match(/!\[:(?:Team|Person)\]\((\d+)\)/i);
+  if (mentionMatch) return mentionMatch[1];
+
+  const jidMatch = prompt.match(/\brc[b]?:([0-9]+)\b/i);
+  if (jidMatch) return jidMatch[1];
+
+  const bareIdMatch = prompt.match(
+    /\b(?:from|with|chat|team|id)\s+([0-9]{6,})\b/i,
+  );
+  if (bareIdMatch) return bareIdMatch[1];
+
+  return null;
+}
+
 function buildPrompt(
   history: OpenAIHistoryTurn[],
   prompt: string,
@@ -130,6 +202,7 @@ function buildPrompt(
   const rcChat =
     context.containerInput.chatJid.startsWith('rc:') ||
     context.containerInput.chatJid.startsWith('rcb:');
+  const explicitRcTarget = rcChat ? extractExplicitRcTarget(prompt) : null;
 
   const globalContext = loadGlobalContext(context.containerInput.isMain);
   if (globalContext) {
@@ -140,14 +213,16 @@ function buildPrompt(
   const extraDirsSummary = loadAdditionalDirectoriesSummary();
   if (extraDirsSummary) sections.push(extraDirsSummary);
 
-  const filteredHistory = history.filter(
-    (turn) =>
-      turn.role !== 'assistant' ||
-      !shouldDropAssistantHistory(turn.content, {
-        rcChat,
-        personalMode: !!context.containerInput.personalMode,
-      }),
-  );
+  const filteredHistory = shouldSkipHistoryForRcLookup(prompt, rcChat)
+    ? []
+    : history.filter(
+        (turn) =>
+          turn.role !== 'assistant' ||
+          !shouldDropAssistantHistory(turn.content, {
+            rcChat,
+            personalMode: !!context.containerInput.personalMode,
+          }),
+      );
 
   if (filteredHistory.length > 0) {
     sections.push('Conversation so far:');
@@ -176,6 +251,11 @@ function buildPrompt(
     toolInstructions.push(
       'In RingCentral chats, send_message supports delivery_mode="personal" to send through Nasen\'s personal RC app/credentials, delivery_mode="bot" to send through the bot app, and delivery_mode="auto" for the default route.',
     );
+    if (context.containerInput.chatJid === 'rcb:157530931206') {
+      toolInstructions.push(
+        "In this rc-personal chat, RC lookup/read tools use Nasen's personal auth, while outbound replies must use bot delivery. Do not ask RC lookup tools to use bot mode here, and do not ask send_message or send_rc_message to use personal delivery here.",
+      );
+    }
     toolInstructions.push(
       'When the user asks you to act as Nasen, reply on his behalf, send as him, or use his personal RingCentral account, prefer delivery_mode="personal".',
     );
@@ -183,10 +263,21 @@ function buildPrompt(
       'For RingCentral SDK operations across teams or DMs, use list_rc_chats, read_rc_messages, and send_rc_message instead of guessing from memory.',
     );
     toolInstructions.push(
-      'When the user asks for the latest message or a summary from a RingCentral team by name or ID, first call list_rc_chats to locate the chat, then call read_rc_messages on the matching chat. Do not rely on workspace files or old conversation history for live RC content when these tools are available.',
+      'When the user asks for the latest message or a summary from a RingCentral team or DM by name, first call list_rc_chats to locate the chat, then call read_rc_messages on the matching chat. Do not rely on workspace files or old conversation history for live RC content when these tools are available.',
     );
     toolInstructions.push(
-      'If the user provides a numeric RC chat/team ID, you may call read_rc_messages with that ID directly even if list_rc_chats does not find it. Prefer the direct ID read over saying the chat is unavailable.',
+      'If the user provides a numeric RC chat/team ID, a full JID like rc:123, or a RingCentral mention like ![:Team](123), call read_rc_messages with that ID directly before trying list_rc_chats. Prefer the direct ID read over saying the chat is unavailable.',
+    );
+    toolInstructions.push(
+      'When the latest RingCentral request includes an explicit target such as ![:Team](123), ![:Person](123), rc:123, rcb:123, or a bare numeric chat ID, that exact target is authoritative for this turn. Do not reuse or substitute a different DM or team from earlier conversation history.',
+    );
+    if (explicitRcTarget) {
+      toolInstructions.push(
+        `For this turn, the exact RingCentral target is ${explicitRcTarget}. You must call read_rc_messages with that exact target before answering. Do not substitute a different team or DM name, and do not answer from memory.`,
+      );
+    }
+    toolInstructions.push(
+      'If the user asks for messages "with <person name>" in RingCentral, treat it as a DM lookup. Prefer a direct DM/local-cache resolution path and avoid repeating list_rc_chats after earlier RC timeout or rate-limit failures shown in conversation history.',
     );
     toolInstructions.push(
       'Only say that an RC chat is unavailable after those RC tools return no match or an error, and mention the exact team name or ID you searched.',
@@ -195,10 +286,19 @@ function buildPrompt(
 
   if (context.containerInput.personalMode) {
     toolInstructions.push(
-      'In personal mode, send_message can send messages through the user\'s connected integrations on their behalf in the current chat.',
+      "In personal mode, send_message can send messages through the user's connected integrations on their behalf in the current chat.",
     );
     toolInstructions.push(
       'If the user asks you to send, reply, or follow up in this chat, use send_message instead of saying you cannot access their personal account or token.',
+    );
+    toolInstructions.push(
+      'In personal mode, external MCP connectors such as GitLab, Jira/Atlassian, Gmail, Figma, and M365 may be connected for this turn. When the user explicitly asks for GitLab or Jira data, prefer the connected MCP tools over shell, local git inspection, or web search.',
+    );
+    toolInstructions.push(
+      'If a GitLab MCP server is connected, use its GitLab tools first for pipelines, merge requests, commits, projects, or issues. Do not claim GitLab tools are unavailable unless MCP connection or tool calls actually fail in this turn.',
+    );
+    toolInstructions.push(
+      'Only fall back to shell or web lookup for GitLab/Jira after MCP tool calls fail or return insufficient data, and say that you are falling back.',
     );
   }
   toolInstructions.push(
@@ -259,8 +359,7 @@ function getBuiltinToolDefinitions(): OpenAIToolDefinition[] {
           },
           timeout_ms: {
             type: 'integer',
-            description:
-              'Optional timeout in milliseconds. Defaults to 45000.',
+            description: 'Optional timeout in milliseconds. Defaults to 45000.',
           },
         },
         required: ['url'],
@@ -281,8 +380,7 @@ function getBuiltinToolDefinitions(): OpenAIToolDefinition[] {
           },
           timeout_ms: {
             type: 'integer',
-            description:
-              'Optional timeout in milliseconds. Defaults to 45000.',
+            description: 'Optional timeout in milliseconds. Defaults to 45000.',
           },
         },
         required: ['query'],
@@ -296,152 +394,248 @@ function sanitizeToolName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 64);
 }
 
-function requestedExternalMcpServers(prompt: string): Set<string> {
-  const text = prompt.toLowerCase();
-  const requested = new Set<string>();
+const LooseListToolsResultSchema = z
+  .object({
+    tools: z.array(z.any()),
+    nextCursor: z.string().optional(),
+  })
+  .passthrough();
 
-  if (/\b(jira|ticket|issue)\b/.test(text) || /\b[A-Z][A-Z0-9]+-\d+\b/.test(prompt)) {
-    requested.add('jira');
-  }
-  if (/\b(gitlab|merge request|mr\b|pipeline|commit)\b/.test(text)) {
-    requested.add('gitlab');
-  }
-  if (/\b(gmail|email|inbox|mail)\b/.test(text)) {
-    requested.add('gmail');
-  }
-  if (/\b(testit|test case|test plan)\b/.test(text)) {
-    requested.add('testit');
-  }
-  if (/\b(figma|design file)\b/.test(text)) {
-    requested.add('figma');
-  }
-  if (/\b(outlook|m365|teams|calendar)\b/.test(text)) {
-    requested.add('m365');
+function normalizeToolInputSchema(
+  inputSchema: unknown,
+): Record<string, unknown> {
+  if (
+    inputSchema &&
+    typeof inputSchema === 'object' &&
+    !Array.isArray(inputSchema)
+  ) {
+    const schema = { ...(inputSchema as Record<string, unknown>) };
+    if (schema.type === 'object') return schema;
+
+    const hasObjectKeywords =
+      'properties' in schema ||
+      'required' in schema ||
+      'additionalProperties' in schema ||
+      'patternProperties' in schema;
+
+    if (hasObjectKeywords || schema.type === undefined) {
+      return { type: 'object', ...schema };
+    }
   }
 
-  return requested;
+  return {
+    type: 'object',
+    properties: {},
+    additionalProperties: true,
+  };
 }
 
-function getMcpServerConfigs(context: AgentTurnContext): McpServerConfig[] {
-  const env = Object.fromEntries(
-    Object.entries(context.agentEnv).filter(
-      (entry): entry is [string, string] => typeof entry[1] === 'string',
-    ),
+function normalizeListedTool(tool: unknown): McpListedTool | null {
+  if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return null;
+
+  const candidate = tool as Record<string, unknown>;
+  if (typeof candidate.name !== 'string' || candidate.name.trim() === '') {
+    return null;
+  }
+
+  return {
+    name: candidate.name,
+    description:
+      typeof candidate.description === 'string'
+        ? candidate.description
+        : undefined,
+    inputSchema: normalizeToolInputSchema(candidate.inputSchema),
+    outputSchema:
+      candidate.outputSchema &&
+      typeof candidate.outputSchema === 'object' &&
+      !Array.isArray(candidate.outputSchema)
+        ? (candidate.outputSchema as Record<string, unknown>)
+        : undefined,
+    execution:
+      candidate.execution &&
+      typeof candidate.execution === 'object' &&
+      !Array.isArray(candidate.execution)
+        ? (candidate.execution as { taskSupport?: string })
+        : undefined,
+  };
+}
+
+function getPromptTokens(prompt: string): string[] {
+  const tokens = prompt.toLowerCase().match(/[a-z0-9_]{3,}/g) || [];
+  return Array.from(new Set(tokens));
+}
+
+function promptIndicatesWriteAction(promptTokens: string[]): boolean {
+  return promptTokens.some((token) =>
+    [
+      'send',
+      'draft',
+      'create',
+      'update',
+      'delete',
+      'modify',
+      'remove',
+      'add',
+      'reply',
+      'write',
+    ].includes(token),
+  );
+}
+
+function scoreToolForPrompt(
+  tool: McpListedTool,
+  promptTokens: string[],
+): number {
+  const haystack = `${tool.name} ${tool.description || ''}`.toLowerCase();
+  let score = 0;
+
+  for (const token of promptTokens) {
+    if (haystack.includes(token)) score += 3;
+  }
+
+  const wantsWriteAction = promptIndicatesWriteAction(promptTokens);
+
+  const readLike = /^(get|read|search|list)/.test(tool.name);
+  const writeLike =
+    /^(send|draft|create|update|delete|modify|remove|add|batch)/.test(
+      tool.name,
+    );
+
+  if (wantsWriteAction) {
+    if (writeLike) score += 2;
+    if (readLike) score += 1;
+  } else {
+    if (readLike) score += 2;
+    if (writeLike) score -= 1;
+  }
+
+  return score;
+}
+
+function selectGmailToolsForPrompt(
+  tools: McpListedTool[],
+  promptTokens: string[],
+): McpListedTool[] {
+  const wantsWriteAction = promptIndicatesWriteAction(promptTokens);
+  const wantsFilters = promptTokens.some((token) =>
+    ['filter', 'filters'].includes(token),
+  );
+  const wantsLabels = promptTokens.some((token) =>
+    ['label', 'labels'].includes(token),
+  );
+  const wantsAttachments = promptTokens.some((token) =>
+    ['attachment', 'attachments', 'download'].includes(token),
   );
 
-  const configs: McpServerConfig[] = [
-    {
-      serverName: 'nanoclaw',
-      transport: 'stdio',
-      command: 'node',
-      args: [context.mcpServerPath],
-      cwd: '/workspace/group',
-      env: {
-        ...env,
-        NANOCLAW_CHAT_JID: context.containerInput.chatJid,
-        NANOCLAW_GROUP_FOLDER: context.containerInput.groupFolder,
-        NANOCLAW_IS_MAIN: context.containerInput.isMain ? '1' : '0',
-      },
-      startupTimeoutMs: DEFAULT_MCP_STARTUP_TIMEOUT_MS,
-    },
-  ];
+  const allowed = new Set<string>(
+    wantsWriteAction
+      ? [
+          'send_email',
+          'draft_email',
+          'read_email',
+          'search_emails',
+          'modify_email',
+          'delete_email',
+        ]
+      : ['read_email', 'search_emails'],
+  );
 
-  if (!context.containerInput.personalMode) return configs;
-  const requested = requestedExternalMcpServers(context.prompt);
-  if (requested.size === 0) return configs;
-
-  if (requested.has('gmail')) {
-    configs.push({
-      serverName: 'gmail',
-      transport: 'stdio',
-      command: 'npx',
-      args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-      env,
-      startupTimeoutMs: SLOW_MCP_STARTUP_TIMEOUT_MS,
-    });
+  if (wantsLabels || wantsWriteAction) {
+    allowed.add('list_email_labels');
   }
 
-  if (requested.has('jira')) {
-    configs.push({
-      serverName: 'atlassian',
-      transport: 'streamable-http',
-      url: 'https://mcp-atlassian.int.rclabenv.com/mcp/',
-      requestInit: {
-        headers: {
-          'confluence-read-token': context.agentEnv.CONFLUENCE_READ_TOKEN ?? '',
-          'jira-read-token': context.agentEnv.JIRA_TOKEN ?? '',
-        },
-      },
-      startupTimeoutMs: SLOW_MCP_STARTUP_TIMEOUT_MS,
-    });
+  if (wantsAttachments) {
+    allowed.add('download_attachment');
   }
 
-  if (requested.has('testit')) {
-    configs.push({
-      serverName: 'testit',
-      transport: 'stdio',
-      command: 'npx',
-      args: [
-        '-y',
-        '--registry',
-        'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
-        '@ringcentral/mcp-testit-fetcher',
-      ],
-      env,
-      startupTimeoutMs: SLOW_MCP_STARTUP_TIMEOUT_MS,
-    });
+  if (wantsFilters) {
+    allowed.add('create_filter');
+    allowed.add('list_filters');
+    allowed.add('get_filter');
+    allowed.add('delete_filter');
+    allowed.add('create_filter_from_template');
   }
 
-  if (requested.has('gitlab')) {
-    configs.push({
-      serverName: 'gitlab',
-      transport: 'stdio',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-gitlab'],
-      env: {
-        ...env,
-        GITLAB_PERSONAL_ACCESS_TOKEN:
-          context.agentEnv.GITLAB_PERSONAL_ACCESS_TOKEN ?? '',
-        GITLAB_API_URL: 'https://git.ringcentral.com/api/v4',
-      },
-      startupTimeoutMs: SLOW_MCP_STARTUP_TIMEOUT_MS,
-    });
-  }
-
-  if (requested.has('figma') && fs.existsSync('/workspace/figma-mcp/index.js')) {
-    configs.push({
-      serverName: 'figma',
-      transport: 'stdio',
-      command: 'node',
-      args: ['/workspace/figma-mcp/index.js'],
-      env,
-      startupTimeoutMs: DEFAULT_MCP_STARTUP_TIMEOUT_MS,
-    });
-  }
-
-  if (requested.has('m365') && HAS_M365_MCP) {
-    configs.push({
-      serverName: 'm365',
-      transport: 'stdio',
-      command: 'm365-mcp',
-      args: [],
-      env: {
-        ...env,
-        MS_CLIENT_ID: context.agentEnv.OUTLOOK_CLIENT_ID ?? '',
-        MS_CLIENT_SECRET: context.agentEnv.OUTLOOK_CLIENT_SECRET ?? '',
-        MS_TENANT_ID: context.agentEnv.MS_TENANT_ID ?? '',
-        USE_TEST_MODE: 'false',
-      },
-      startupTimeoutMs: DEFAULT_MCP_STARTUP_TIMEOUT_MS,
-    });
-  }
-
-  return configs;
+  const selected = tools.filter((tool) => allowed.has(tool.name));
+  return selected.length > 0 ? selected : tools;
 }
 
-async function connectMcpServers(
+function selectOpenAiToolsForPrompt(
+  serverName: string,
+  tools: McpListedTool[],
+  prompt: string,
   context: AgentTurnContext,
-): Promise<{
+): McpListedTool[] {
+  if (serverName === 'nanoclaw') return tools;
+  if (tools.length <= MAX_OPENAI_EXTERNAL_MCP_TOOLS) return tools;
+
+  const promptTokens = getPromptTokens(prompt);
+  const candidateTools =
+    serverName === 'gmail'
+      ? selectGmailToolsForPrompt(tools, promptTokens)
+      : tools;
+  const ranked = candidateTools
+    .map((tool, index) => ({
+      tool,
+      index,
+      score: scoreToolForPrompt(tool, promptTokens),
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  const selected = ranked
+    .slice(0, MAX_OPENAI_EXTERNAL_MCP_TOOLS)
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.tool);
+
+  const omittedNames = tools
+    .filter(
+      (tool) =>
+        !selected.some((selectedTool) => selectedTool.name === tool.name),
+    )
+    .map((tool) => tool.name);
+
+  context.log(
+    `Selected ${selected.length}/${tools.length} MCP tools for ${serverName}; omitted: ${omittedNames.join(', ') || 'none'}`,
+  );
+
+  return selected;
+}
+
+async function listToolsWithCompatibility(
+  client: Client,
+  server: {
+    serverName: string;
+    startupTimeoutMs?: number;
+  },
+  context: AgentTurnContext,
+): Promise<McpListedTool[]> {
+  try {
+    const result = await client.listTools(undefined, {
+      timeout: server.startupTimeoutMs || DEFAULT_MCP_STARTUP_TIMEOUT_MS,
+    });
+    return result.tools as McpListedTool[];
+  } catch (err) {
+    context.log(
+      `Falling back to legacy tools/list parsing for ${server.serverName}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+
+    const rawResult = await client.request(
+      { method: 'tools/list', params: undefined },
+      LooseListToolsResultSchema,
+      {
+        timeout: server.startupTimeoutMs || DEFAULT_MCP_STARTUP_TIMEOUT_MS,
+      },
+    );
+
+    return rawResult.tools
+      .map((tool) => normalizeListedTool(tool))
+      .filter((tool): tool is McpListedTool => tool !== null);
+  }
+}
+
+async function connectMcpServers(context: AgentTurnContext): Promise<{
   clients: Map<string, Client>;
   transports: Array<StdioClientTransport | StreamableHTTPClientTransport>;
   toolDefinitions: OpenAIToolDefinition[];
@@ -450,10 +644,11 @@ async function connectMcpServers(
   const bindings = new Map<string, McpToolBinding>();
   const toolDefinitions: OpenAIToolDefinition[] = [];
   const clients = new Map<string, Client>();
-  const transports: Array<StdioClientTransport | StreamableHTTPClientTransport> =
-    [];
+  const transports: Array<
+    StdioClientTransport | StreamableHTTPClientTransport
+  > = [];
 
-  for (const server of getMcpServerConfigs(context)) {
+  for (const server of getOpenAiMcpServerConfigs(context)) {
     const transport =
       server.transport === 'streamable-http'
         ? new StreamableHTTPClientTransport(new URL(server.url!), {
@@ -489,16 +684,25 @@ async function connectMcpServers(
       await client.connect(transport, {
         timeout: server.startupTimeoutMs || DEFAULT_MCP_STARTUP_TIMEOUT_MS,
       });
-      const { tools } = await client.listTools(undefined, {
-        timeout: server.startupTimeoutMs || DEFAULT_MCP_STARTUP_TIMEOUT_MS,
-      });
+      const listedTools = await listToolsWithCompatibility(
+        client,
+        server,
+        context,
+      );
+      const tools = selectOpenAiToolsForPrompt(
+        server.serverName,
+        listedTools,
+        context.prompt,
+        context,
+      );
       clients.set(server.serverName, client);
       transports.push(transport);
 
       for (const tool of tools) {
-        const openAiName = sanitizeToolName(
-          `mcp_${server.serverName}__${tool.name}`,
-        );
+        const openAiName =
+          server.serverName === 'nanoclaw'
+            ? sanitizeToolName(tool.name)
+            : sanitizeToolName(`mcp_${server.serverName}__${tool.name}`);
         bindings.set(openAiName, {
           openAiName,
           serverName: server.serverName,
@@ -550,7 +754,10 @@ function formatMcpToolResult(result: {
     for (const item of result.content) {
       if (item.type === 'text' && typeof item.text === 'string') {
         parts.push(item.text);
-      } else if (item.type === 'resource_link' && typeof item.name === 'string') {
+      } else if (
+        item.type === 'resource_link' &&
+        typeof item.name === 'string'
+      ) {
         parts.push(
           `Resource: ${item.name}${typeof item.uri === 'string' ? ` (${item.uri})` : ''}`,
         );
@@ -566,16 +773,67 @@ function formatMcpToolResult(result: {
     parts.push(JSON.stringify(result.structuredContent, null, 2));
   }
 
+  const combinedOutput = truncateOutput(parts.join('\n\n').trim());
+  const normalizedOutput = combinedOutput.toLowerCase();
+  const inferredAuthError =
+    normalizedOutput === 'error: invalid_grant' ||
+    normalizedOutput.includes('invalid_grant')
+      ? 'invalid_grant'
+      : normalizedOutput.includes('invalid credentials')
+        ? 'invalid_credentials'
+        : normalizedOutput.includes('unauthorized') ||
+            normalizedOutput.includes('authentication failed')
+          ? 'auth_failed'
+          : null;
+  const isError = !!result.isError || inferredAuthError !== null;
+
   return JSON.stringify({
-    ok: !result.isError,
-    is_error: !!result.isError,
-    output: truncateOutput(parts.join('\n\n').trim()),
+    ok: !isError,
+    is_error: isError,
+    auth_error: inferredAuthError || undefined,
+    output: combinedOutput,
   });
 }
 
-function normalizeMcpCallResult(result: {
-  [key: string]: unknown;
-}): { content?: Array<Record<string, unknown>>; structuredContent?: Record<string, unknown>; isError?: boolean } {
+function extractToolErrorMessage(output: string): string | null {
+  try {
+    const parsed = JSON.parse(output) as {
+      ok?: unknown;
+      is_error?: unknown;
+      error?: unknown;
+      output?: unknown;
+      auth_error?: unknown;
+    };
+    if (!(parsed.ok === false || parsed.is_error === true)) {
+      return null;
+    }
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+    if (typeof parsed.output === 'string' && parsed.output.trim()) {
+      return parsed.output.trim();
+    }
+    if (typeof parsed.auth_error === 'string' && parsed.auth_error.trim()) {
+      return `authentication failed: ${parsed.auth_error.trim()}`;
+    }
+    return 'a required tool failed';
+  } catch {
+    return output.trim() || null;
+  }
+}
+
+function buildEmptyFinalFallback(toolErrors: string[]): string {
+  const uniqueErrors = Array.from(
+    new Set(toolErrors.map((message) => message.trim()).filter(Boolean)),
+  );
+  return `I couldn't complete that because ${uniqueErrors[0] || 'a required tool failed'}.`;
+}
+
+function normalizeMcpCallResult(result: { [key: string]: unknown }): {
+  content?: Array<Record<string, unknown>>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+} {
   if ('toolResult' in result) {
     return {
       isError: false,
@@ -703,12 +961,16 @@ async function runShellTool(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
       ),
     );
-    const { stdout, stderr } = await execFileAsync('/bin/bash', ['-lc', command], {
-      cwd,
-      timeout,
-      maxBuffer: MAX_TOOL_OUTPUT_CHARS * 2,
-      env,
-    });
+    const { stdout, stderr } = await execFileAsync(
+      '/bin/bash',
+      ['-lc', command],
+      {
+        cwd,
+        timeout,
+        maxBuffer: MAX_TOOL_OUTPUT_CHARS * 2,
+        env,
+      },
+    );
 
     return JSON.stringify({
       ok: true,
@@ -760,9 +1022,7 @@ async function runWebFetchTool(
     '--silent',
     '--show-error',
     '--max-time',
-    String(
-      Math.ceil((args.timeout_ms || DEFAULT_WEB_TIMEOUT_MS) / 1000),
-    ),
+    String(Math.ceil((args.timeout_ms || DEFAULT_WEB_TIMEOUT_MS) / 1000)),
   ];
   const env = Object.fromEntries(
     Object.entries(context.agentEnv).filter(
@@ -887,18 +1147,84 @@ async function runMcpTool(
   }
 }
 
+async function postOpenAIResponseWithRetry(
+  baseUrl: string,
+  headers: Record<string, string>,
+  requestBody: Record<string, unknown>,
+  context: AgentTurnContext,
+): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= MAX_OPENAI_RESPONSE_RETRIES; attempt++) {
+    try {
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+
+      if (response.ok) {
+        return response;
+      }
+
+      const errorBody = await response.text();
+      const error = new Error(
+        `OpenAI request failed (${response.status}): ${errorBody}`,
+      );
+
+      if (
+        attempt < MAX_OPENAI_RESPONSE_RETRIES &&
+        response.status >= 500 &&
+        response.status < 600
+      ) {
+        context.log(
+          `Retrying OpenAI request after transient ${response.status} (attempt ${attempt + 1}/${MAX_OPENAI_RESPONSE_RETRIES})`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, OPENAI_RETRY_DELAY_MS * (attempt + 1)),
+        );
+        lastError = error;
+        continue;
+      }
+
+      throw error;
+    } catch (err) {
+      const error =
+        err instanceof Error ? err : new Error(String(err ?? 'Unknown error'));
+
+      if (attempt < MAX_OPENAI_RESPONSE_RETRIES) {
+        context.log(
+          `Retrying OpenAI request after error: ${error.message} (attempt ${attempt + 1}/${MAX_OPENAI_RESPONSE_RETRIES})`,
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, OPENAI_RETRY_DELAY_MS * (attempt + 1)),
+        );
+        lastError = error;
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw lastError || new Error('OpenAI request failed after retries');
+}
+
 async function runOpenAITurn(
   context: AgentTurnContext,
 ): Promise<AgentTurnResult> {
   const sessionId = context.sessionId || crypto.randomUUID();
   const state = loadSessionState(sessionId);
   const model = context.agentEnv.AGENT_MODEL || DEFAULT_OPENAI_MODEL;
-  const baseUrl = (context.agentEnv.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(
-    /\/$/,
-    '',
-  );
+  const baseUrl = (
+    context.agentEnv.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  ).replace(/\/$/, '');
   const apiKey = context.agentEnv.OPENAI_API_KEY || '';
   const compiledPrompt = buildPrompt(state.history, context.prompt, context);
+  const explicitRcTarget =
+    (context.containerInput.chatJid.startsWith('rc:') ||
+      context.containerInput.chatJid.startsWith('rcb:')) &&
+    extractExplicitRcTarget(context.prompt);
 
   context.log(
     `Running OpenAI turn (session: ${sessionId}, model: ${model}, history: ${state.history.length})`,
@@ -925,24 +1251,20 @@ async function runOpenAITurn(
       model,
       input: conversationInput,
       tools,
+      ...(explicitRcTarget ? { tool_choice: 'required' } : {}),
     };
     let payload: unknown;
     const sentMessages: string[] = [];
     const sentMessageKeys = new Set<string>();
+    const toolErrors: string[] = [];
 
     for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: 'POST',
+      const response = await postOpenAIResponseWithRetry(
+        baseUrl,
         headers,
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `OpenAI request failed (${response.status}): ${errorBody}`,
-        );
-      }
+        requestBody,
+        context,
+      );
 
       payload = (await response.json()) as unknown;
       context.log(
@@ -974,7 +1296,10 @@ async function runOpenAITurn(
             let parsedArgs: Record<string, unknown> | null = null;
             if (binding) {
               try {
-                parsedArgs = JSON.parse(call.arguments) as Record<string, unknown>;
+                parsedArgs = JSON.parse(call.arguments) as Record<
+                  string,
+                  unknown
+                >;
               } catch {
                 // Ignore malformed tool args; downstream handling will surface the error.
               }
@@ -1030,6 +1355,11 @@ async function runOpenAITurn(
           }
         }
 
+        const toolError = extractToolErrorMessage(output);
+        if (toolError) {
+          toolErrors.push(toolError);
+        }
+
         toolOutputs.push({
           type: 'function_call_output',
           call_id: call.call_id,
@@ -1043,6 +1373,7 @@ async function runOpenAITurn(
         model,
         input: conversationInput,
         tools,
+        ...(explicitRcTarget ? { tool_choice: 'required' } : {}),
       };
     }
 
@@ -1052,17 +1383,21 @@ async function runOpenAITurn(
 
     const text = extractTextFromResponse(payload);
     const finalOutput = chooseFinalAssistantOutput(text, sentMessages);
+    const outputText =
+      finalOutput.outputText ||
+      (toolErrors.length > 0 ? buildEmptyFinalFallback(toolErrors) : '');
+    const historyText = outputText || finalOutput.historyText;
 
     state.history.push({ role: 'user', content: context.prompt });
     state.history.push({
       role: 'assistant',
-      content: finalOutput.historyText,
+      content: historyText,
     });
     saveSessionState(sessionId, state);
 
     context.emitOutput({
       status: 'success',
-      result: finalOutput.outputText || null,
+      result: outputText || null,
       newSessionId: sessionId,
     });
 

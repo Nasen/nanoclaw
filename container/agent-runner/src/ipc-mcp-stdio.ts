@@ -105,6 +105,23 @@ const notebookLmSourceSchema = z.union([
   }),
 ]);
 
+const rcModeSchema = z
+  .enum(['auto', 'personal', 'bot'])
+  .default('auto')
+  .describe('Which RC identity to use.');
+
+const rcContactSchema = z.object({
+  first_name: z.string().optional().describe('Contact first name.'),
+  last_name: z.string().optional().describe('Contact last name.'),
+  email: z.string().email().optional().describe('Primary email address.'),
+  company: z.string().optional().describe('Company or organization name.'),
+  job_title: z.string().optional().describe('Job title.'),
+  business_phone: z.string().optional().describe('Business phone number.'),
+  mobile_phone: z.string().optional().describe('Mobile phone number.'),
+  home_phone: z.string().optional().describe('Home phone number.'),
+  other_phone: z.string().optional().describe('Additional phone number.'),
+});
+
 const server = new McpServer({
   name: 'nanoclaw',
   version: '1.0.0',
@@ -426,7 +443,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
         CronExpressionParser.parse(args.schedule_value);
       } catch {
         return {
-          content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid cron: "${args.schedule_value}". Use format like "0 9 * * *" (daily 9am) or "*/5 * * * *" (every 5 min).`,
+            },
+          ],
           isError: true,
         };
       }
@@ -434,28 +456,47 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       const ms = parseInt(args.schedule_value, 10);
       if (isNaN(ms) || ms <= 0) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid interval: "${args.schedule_value}". Must be positive milliseconds (e.g., "300000" for 5 min).`,
+            },
+          ],
           isError: true,
         };
       }
     } else if (args.schedule_type === 'once') {
-      if (/[Zz]$/.test(args.schedule_value) || /[+-]\d{2}:\d{2}$/.test(args.schedule_value)) {
+      if (
+        /[Zz]$/.test(args.schedule_value) ||
+        /[+-]\d{2}:\d{2}$/.test(args.schedule_value)
+      ) {
         return {
-          content: [{ type: 'text' as const, text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Timestamp must be local time without timezone suffix. Got "${args.schedule_value}" — use format like "2026-02-01T15:30:00".`,
+            },
+          ],
           isError: true,
         };
       }
       const date = new Date(args.schedule_value);
       if (isNaN(date.getTime())) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid timestamp: "${args.schedule_value}". Use local time format like "2026-02-01T15:30:00".`,
+            },
+          ],
           isError: true,
         };
       }
     }
 
     // Non-main groups can only schedule for themselves
-    const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+    const targetJid =
+      isMain && args.target_group_jid ? args.target_group_jid : chatJid;
 
     const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -474,7 +515,12 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${taskId} scheduled: ${args.schedule_type} - ${args.schedule_value}`,
+        },
+      ],
     };
   },
 );
@@ -491,30 +537,56 @@ server.registerTool(
 
     try {
       if (!fs.existsSync(tasksFile)) {
-        return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
+        return {
+          content: [
+            { type: 'text' as const, text: 'No scheduled tasks found.' },
+          ],
+        };
       }
 
       const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
 
       const tasks = isMain
         ? allTasks
-        : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === groupFolder);
+        : allTasks.filter(
+            (t: { groupFolder: string }) => t.groupFolder === groupFolder,
+          );
 
       if (tasks.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
+        return {
+          content: [
+            { type: 'text' as const, text: 'No scheduled tasks found.' },
+          ],
+        };
       }
 
       const formatted = tasks
         .map(
-          (t: { id: string; prompt: string; schedule_type: string; schedule_value: string; status: string; next_run: string }) =>
+          (t: {
+            id: string;
+            prompt: string;
+            schedule_type: string;
+            schedule_value: string;
+            status: string;
+            next_run: string;
+          }) =>
             `- [${t.id}] ${t.prompt.slice(0, 50)}... (${t.schedule_type}: ${t.schedule_value}) - ${t.status}, next: ${t.next_run || 'N/A'}`,
         )
         .join('\n');
 
-      return { content: [{ type: 'text' as const, text: `Scheduled tasks:\n${formatted}` }] };
+      return {
+        content: [
+          { type: 'text' as const, text: `Scheduled tasks:\n${formatted}` },
+        ],
+      };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [
+          {
+            type: 'text' as const,
+            text: `Error reading tasks: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
       };
     }
   },
@@ -545,23 +617,42 @@ server.registerTool(
   },
   async (args) => {
     try {
-      const response = await requestTask('rc_list_chats', {
-        query: args.query,
-        limit: args.limit,
-        mode: args.mode,
-      });
+      const response = await requestTask(
+        'rc_list_chats',
+        {
+          query: args.query,
+          limit: args.limit,
+          mode: args.mode,
+        },
+        90000,
+      );
       if (!response.ok) {
         return {
-          content: [{ type: 'text' as const, text: String(response.error || 'Failed to list RC chats.') }],
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to list RC chats.'),
+            },
+          ],
           isError: true,
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(response.chats ?? [], null, 2) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.chats ?? [], null, 2),
+          },
+        ],
       };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
         isError: true,
       };
     }
@@ -599,16 +690,31 @@ server.registerTool(
       });
       if (!response.ok) {
         return {
-          content: [{ type: 'text' as const, text: String(response.error || 'Failed to read RC messages.') }],
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to read RC messages.'),
+            },
+          ],
           isError: true,
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(response.transcript ?? {}, null, 2) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.transcript ?? {}, null, 2),
+          },
+        ],
       };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
         isError: true,
       };
     }
@@ -640,16 +746,496 @@ server.registerTool(
       });
       if (!response.ok) {
         return {
-          content: [{ type: 'text' as const, text: String(response.error || 'Failed to send RC message.') }],
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to send RC message.'),
+            },
+          ],
           isError: true,
         };
       }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify(response.result ?? {}, null, 2) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.result ?? {}, null, 2),
+          },
+        ],
       };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: err instanceof Error ? err.message : String(err) }],
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'list_rc_chat_members',
+  {
+    description: 'List members in a RingCentral team or DM chat.',
+    inputSchema: {
+      chat_id: z
+        .string()
+        .describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(250)
+        .default(100)
+        .describe('Maximum members to return.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_list_chat_members', {
+        chatId: args.chat_id,
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to list RC chat members.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.members ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'get_rc_presence',
+  {
+    description:
+      'Read RingCentral presence for yourself or a specific extension.',
+    inputSchema: {
+      extension_id: z
+        .string()
+        .optional()
+        .describe('Optional extension ID. Omit to read your own presence.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_get_presence', {
+        extensionId: args.extension_id,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to get RC presence.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.presence ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'set_rc_presence',
+  {
+    description: 'Update your RingCentral presence and/or DND status.',
+    inputSchema: {
+      user_status: z
+        .enum(['Available', 'Busy', 'Away'])
+        .optional()
+        .describe('Presence status to set.'),
+      dnd_status: z
+        .enum([
+          'TakeAllCalls',
+          'DoNotAcceptDepartmentCalls',
+          'TakeDepartmentCallsOnly',
+          'DoNotAcceptAnyCalls',
+          'DoNotDisturb',
+        ])
+        .optional()
+        .describe('Do Not Disturb / call handling status to set.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_set_presence', {
+        userStatus: args.user_status,
+        dndStatus: args.dnd_status,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to update RC presence.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.presence ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'get_rc_extension',
+  {
+    description:
+      'Get RingCentral extension details for yourself or a specific extension.',
+    inputSchema: {
+      extension_id: z
+        .string()
+        .optional()
+        .describe('Optional extension ID. Omit to read your own extension.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_get_extension', {
+        extensionId: args.extension_id,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to get RC extension.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.extension ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'list_rc_extensions',
+  {
+    description:
+      'List RingCentral extensions accessible to the integrated account.',
+    inputSchema: {
+      query: z
+        .string()
+        .optional()
+        .describe('Optional filter for extension ID, number, name, or email.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum extensions to return.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_list_extensions', {
+        query: args.query,
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to list RC extensions.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.extensions ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'list_rc_contacts',
+  {
+    description:
+      'List personal RingCentral contacts in the integrated account.',
+    inputSchema: {
+      query: z
+        .string()
+        .optional()
+        .describe(
+          'Optional filter for contact name, email, company, or title.',
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum contacts to return.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_list_contacts', {
+        query: args.query,
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to list RC contacts.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.contacts ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'create_rc_contact',
+  {
+    description: 'Create a RingCentral personal contact.',
+    inputSchema: {
+      contact: rcContactSchema.describe('Contact fields to create.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'rc_create_contact',
+        {
+          contact: {
+            firstName: args.contact.first_name,
+            lastName: args.contact.last_name,
+            email: args.contact.email,
+            company: args.contact.company,
+            jobTitle: args.contact.job_title,
+            businessPhone: args.contact.business_phone,
+            mobilePhone: args.contact.mobile_phone,
+            homePhone: args.contact.home_phone,
+            otherPhone: args.contact.other_phone,
+          },
+          mode: args.mode,
+        },
+        30000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to create RC contact.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.contact ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'list_rc_phone_numbers',
+  {
+    description:
+      'List phone numbers assigned to the integrated RingCentral extension.',
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe('Maximum phone numbers to return.'),
+      mode: rcModeSchema,
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_list_phone_numbers', {
+        limit: args.limit,
+        mode: args.mode,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to list RC phone numbers.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.phoneNumbers ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
         isError: true,
       };
     }
@@ -675,7 +1261,14 @@ server.registerTool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} pause requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} pause requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -698,7 +1291,14 @@ server.registerTool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} resume requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} resume requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -721,7 +1321,14 @@ server.registerTool(
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} cancellation requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} cancellation requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -745,13 +1352,21 @@ server.registerTool(
   },
   async (args) => {
     // Validate schedule_value if provided
-    if (args.schedule_type === 'cron' || (!args.schedule_type && args.schedule_value)) {
+    if (
+      args.schedule_type === 'cron' ||
+      (!args.schedule_type && args.schedule_value)
+    ) {
       if (args.schedule_value) {
         try {
           CronExpressionParser.parse(args.schedule_value);
         } catch {
           return {
-            content: [{ type: 'text' as const, text: `Invalid cron: "${args.schedule_value}".` }],
+            content: [
+              {
+                type: 'text' as const,
+                text: `Invalid cron: "${args.schedule_value}".`,
+              },
+            ],
             isError: true,
           };
         }
@@ -761,7 +1376,12 @@ server.registerTool(
       const ms = parseInt(args.schedule_value, 10);
       if (isNaN(ms) || ms <= 0) {
         return {
-          content: [{ type: 'text' as const, text: `Invalid interval: "${args.schedule_value}".` }],
+          content: [
+            {
+              type: 'text' as const,
+              text: `Invalid interval: "${args.schedule_value}".`,
+            },
+          ],
           isError: true,
         };
       }
@@ -775,12 +1395,21 @@ server.registerTool(
       timestamp: new Date().toISOString(),
     };
     if (args.prompt !== undefined) data.prompt = args.prompt;
-    if (args.schedule_type !== undefined) data.schedule_type = args.schedule_type;
-    if (args.schedule_value !== undefined) data.schedule_value = args.schedule_value;
+    if (args.schedule_type !== undefined)
+      data.schedule_type = args.schedule_type;
+    if (args.schedule_value !== undefined)
+      data.schedule_value = args.schedule_value;
 
     writeIpcFile(TASKS_DIR, data);
 
-    return { content: [{ type: 'text' as const, text: `Task ${args.task_id} update requested.` }] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: `Task ${args.task_id} update requested.`,
+        },
+      ],
+    };
   },
 );
 
@@ -808,7 +1437,12 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   async (args) => {
     if (!isMain) {
       return {
-        content: [{ type: 'text' as const, text: 'Only the main group can register new groups.' }],
+        content: [
+          {
+            type: 'text' as const,
+            text: 'Only the main group can register new groups.',
+          },
+        ],
         isError: true,
       };
     }
@@ -825,7 +1459,12 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+      content: [
+        {
+          type: 'text' as const,
+          text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+        },
+      ],
     };
   },
 );

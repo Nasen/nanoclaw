@@ -7,15 +7,13 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 
+import { AgentProvider, AgentTurnContext, AgentTurnResult } from '../types.js';
 import {
-  AgentProvider,
-  AgentTurnContext,
-  AgentTurnResult,
-} from '../types.js';
+  getClaudeAllowedToolPatterns,
+  getClaudeMcpServers,
+} from './mcp-registry.js';
 
 const IPC_POLL_MS = 500;
-const HAS_M365_MCP =
-  fs.existsSync('/usr/local/bin/m365-mcp') || fs.existsSync('/usr/bin/m365-mcp');
 
 interface SessionEntry {
   sessionId: string;
@@ -88,8 +86,12 @@ function getSessionSummary(
   }
 
   try {
-    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    const entry = index.entries.find((candidate) => candidate.sessionId === sessionId);
+    const index: SessionsIndex = JSON.parse(
+      fs.readFileSync(indexPath, 'utf-8'),
+    );
+    const entry = index.entries.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
     if (entry?.summary) return entry.summary;
   } catch (err) {
     log(
@@ -271,7 +273,6 @@ async function runClaudeTurn(
     prompt,
     sessionId,
     resumeAt,
-    mcpServerPath,
     containerInput,
     agentEnv,
     emitOutput,
@@ -347,100 +348,13 @@ async function runClaudeTurn(
         'ToolSearch',
         'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*',
-        ...(containerInput.personalMode
-          ? [
-              'mcp__gmail__*',
-              'mcp__jira__*',
-              'mcp__testit__*',
-              'mcp__figma__*',
-              'mcp__gitlab__*',
-              'mcp__atlassian__*',
-              'mcp__m365__*',
-            ]
-          : []),
+        ...getClaudeAllowedToolPatterns(!!containerInput.personalMode),
       ],
       env: agentEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
-        },
-        ...(containerInput.personalMode
-          ? {
-              gmail: {
-                command: 'npx',
-                args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-              },
-              jira: {
-                command: 'npx',
-                args: [
-                  '-y',
-                  '--registry=http://nexus3-xmn02.int.rclabenv.com/repository/npm-group/',
-                  '@ringcentral/mcp-jira',
-                ],
-                env: { JIRA_TOKEN: agentEnv.JIRA_TOKEN ?? '' },
-              },
-              testit: {
-                command: 'npx',
-                args: [
-                  '-y',
-                  '--registry',
-                  'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
-                  '@ringcentral/mcp-testit-fetcher',
-                ],
-              },
-              ...(fs.existsSync('/workspace/figma-mcp/index.js')
-                ? {
-                    figma: {
-                      command: 'node',
-                      args: ['/workspace/figma-mcp/index.js'],
-                    },
-                  }
-                : {}),
-              gitlab: {
-                command: 'npx',
-                args: ['-y', '@modelcontextprotocol/server-gitlab'],
-                env: {
-                  GITLAB_PERSONAL_ACCESS_TOKEN:
-                    agentEnv.GITLAB_PERSONAL_ACCESS_TOKEN ?? '',
-                  GITLAB_API_URL: 'https://git.ringcentral.com/api/v4',
-                },
-              },
-              atlassian: {
-                type: 'http' as const,
-                url: 'https://mcp-atlassian.int.rclabenv.com/mcp/',
-                headers: {
-                  'confluence-read-token':
-                    agentEnv.CONFLUENCE_READ_TOKEN ?? '',
-                  'jira-read-token': agentEnv.JIRA_TOKEN ?? '',
-                },
-              },
-              ...(HAS_M365_MCP
-                ? {
-                    m365: {
-                      command: 'm365-mcp',
-                      args: [],
-                      env: {
-                        MS_CLIENT_ID: agentEnv.OUTLOOK_CLIENT_ID ?? '',
-                        MS_CLIENT_SECRET: agentEnv.OUTLOOK_CLIENT_SECRET ?? '',
-                        MS_TENANT_ID: agentEnv.MS_TENANT_ID ?? '',
-                        USE_TEST_MODE: 'false',
-                      },
-                    },
-                  }
-                : {}),
-            }
-          : {}),
-      },
+      mcpServers: getClaudeMcpServers(context),
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName, log)] },

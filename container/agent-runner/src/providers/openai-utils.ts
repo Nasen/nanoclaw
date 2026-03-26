@@ -9,6 +9,14 @@ const RC_STALE_HISTORY_PATTERNS = [
   /no accessible ringcentral feed/i,
   /don.?t currently have direct access to .*ringcentral/i,
   /latest message.*not available from the workspace data/i,
+  /request rate exceeded/i,
+  /rc(?:_| )list(?:_| )chats timed out/i,
+  /mcp tool list_rc_chats failed:.*request timed out/i,
+  /ringcentral chat lookup hit rate limits/i,
+  /couldn.?t locate that exact team chat right now/i,
+  /unable to complete this rc lookup/i,
+  /current tool environment/i,
+  /no recent messages?.*available in that chat/i,
 ];
 
 const SEND_ON_BEHALF_STALE_PATTERNS = [
@@ -16,6 +24,15 @@ const SEND_ON_BEHALF_STALE_PATTERNS = [
   /can.?t actually send a message using your personal account/i,
   /don.?t have a “send as user” tool/i,
   /can.?t directly send a personal message on your behalf/i,
+];
+
+const THIRD_PARTY_MCP_STALE_PATTERNS = [
+  /don.?t have (?:a|any).*(?:jira|gitlab|atlassian|gmail|figma|m365|outlook).*(?:mcp|tool)/i,
+  /(?:jira|gitlab|atlassian|gmail|figma|m365|outlook).*(?:mcp|tool).*(?:not currently|not available|unavailable)/i,
+  /don.?t have .*specific mcp tools exposed here/i,
+  /dedicated (?:jira|gitlab|atlassian|gmail|figma|m365).*(?:connector|tool).*(?:not currently|unavailable)/i,
+  /don.?t have a direct .*gitlab.*(?:api )?tool available in this session/i,
+  /don.?t have a direct .*jira.*(?:api )?tool available in this session/i,
 ];
 
 export function containsLegacyToolRefusal(text: string): boolean {
@@ -39,6 +56,12 @@ export function shouldDropAssistantHistory(
   if (
     options.personalMode &&
     SEND_ON_BEHALF_STALE_PATTERNS.some((pattern) => pattern.test(text))
+  ) {
+    return true;
+  }
+  if (
+    options.personalMode &&
+    THIRD_PARTY_MCP_STALE_PATTERNS.some((pattern) => pattern.test(text))
   ) {
     return true;
   }
@@ -89,10 +112,7 @@ export function buildTurnMessageDeduplicationKey(
   return null;
 }
 
-export function messagesSubstantiallyOverlap(
-  a: string,
-  b: string,
-): boolean {
+export function messagesSubstantiallyOverlap(a: string, b: string): boolean {
   const left = normalizeComparableText(a);
   const right = normalizeComparableText(b);
   if (!left || !right) return false;
@@ -115,9 +135,7 @@ export function messagesSubstantiallyOverlap(
 export function isSendConfirmation(text: string): boolean {
   const normalized = normalizeComparableText(text);
   if (!normalized) return false;
-  return /^(i )?(sent|posted|replied|told|shared|forwarded)\b/.test(
-    normalized,
-  );
+  return /^(i )?(sent|posted|replied|told|shared|forwarded)\b/.test(normalized);
 }
 
 export function chooseFinalAssistantOutput(
