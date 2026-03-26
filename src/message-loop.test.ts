@@ -14,9 +14,9 @@ function makeGroup(folder: string): RegisteredGroup {
 
 describe('shouldPipeMessagesToActiveContainer', () => {
   it('disables active-container piping for rc-personal', () => {
-    expect(
-      shouldPipeMessagesToActiveContainer(makeGroup('rc-personal')),
-    ).toBe(false);
+    expect(shouldPipeMessagesToActiveContainer(makeGroup('rc-personal'))).toBe(
+      false,
+    );
   });
 
   it('keeps active-container piping for other groups', () => {

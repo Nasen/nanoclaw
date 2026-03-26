@@ -6,10 +6,7 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import {
-  CONTAINER_MAX_OUTPUT_SIZE,
-  CONTAINER_TIMEOUT,
-} from './config.js';
+import { CONTAINER_MAX_OUTPUT_SIZE, CONTAINER_TIMEOUT } from './config.js';
 import { buildContainerArgs, buildVolumeMounts } from './container-config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';

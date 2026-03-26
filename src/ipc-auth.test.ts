@@ -824,9 +824,10 @@ describe('RingCentral IPC handlers', () => {
         'responses',
         `${requestId}.json`,
       );
-      const response = JSON.parse(
-        fs.readFileSync(responsePath, 'utf-8'),
-      ) as { ok: boolean; error?: string };
+      const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8')) as {
+        ok: boolean;
+        error?: string;
+      };
 
       expect(response.ok).toBe(false);
       expect(response.error).toContain('rc_list_chats timed out after 15000ms');

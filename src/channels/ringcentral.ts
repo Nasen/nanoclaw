@@ -1577,7 +1577,10 @@ export class RingCentralChannel implements Channel {
           // Ignore unknown RC chats unless the bot is explicitly @mentioned.
           // Auto-replying here is too risky because unregistered team chats can
           // surface without a bot mention, which would spam the conversation.
-          logger.info({ jid, chatId }, 'Ignoring unknown RC chat without mention');
+          logger.info(
+            { jid, chatId },
+            'Ignoring unknown RC chat without mention',
+          );
           return;
         }
         const group = autoRegisterContact(
