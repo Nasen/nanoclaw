@@ -776,6 +776,57 @@ describe('RingCentralChannel.handleEvent', () => {
       ).lastOwnerIdByChat.get('157530931206'),
     ).toBe('5104955020');
   });
+
+  it('routes owner-only service commands from rc-personal to the control callback', async () => {
+    const onOwnerCommand = vi.fn(async () => {});
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      onOwnerCommand,
+      registeredGroups: () => ({
+        'rc:157530931206': {
+          name: 'NanoClaw-Personal',
+          folder: 'rc-personal',
+          trigger: '@Bob',
+          added_at: '2026-03-26T00:00:00.000Z',
+          requiresTrigger: false,
+          isMain: true,
+        },
+      }),
+      name: 'rc',
+      jidPrefix: 'rc:',
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    Object.assign(channel as object, {
+      botExtId: '5104955020',
+    });
+
+    await (
+      channel as unknown as {
+        handleEvent: (event: unknown) => Promise<void>;
+      }
+    ).handleEvent({
+      body: {
+        eventType: 'PostAdded',
+        id: 'post-2',
+        groupId: '157530931206',
+        creatorId: '5104955020',
+        creationTime: '2026-03-26T06:05:00.000Z',
+        text: 'disable service',
+      },
+    });
+
+    expect(onOwnerCommand).toHaveBeenCalledWith({
+      action: 'set_service_enabled',
+      chatJid: 'rc:157530931206',
+      value: false,
+    });
+  });
 });
 
 describe('RingCentralChannel.listChatsForAgent', () => {

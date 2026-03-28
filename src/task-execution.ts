@@ -17,6 +17,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { getServiceStateVersion, isServiceEnabled } from './service-state.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -69,6 +70,25 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+}
+
+export function skipScheduledTask(
+  task: ScheduledTask,
+  reason: string,
+  runAt = new Date().toISOString(),
+): void {
+  const nextRun = computeNextRun(task);
+  const resultSummary = `Skipped: ${reason}`;
+
+  logTaskRun({
+    task_id: task.id,
+    run_at: runAt,
+    duration_ms: 0,
+    status: 'skipped',
+    result: resultSummary,
+    error: null,
+  });
+  updateTaskAfterRun(task.id, nextRun, resultSummary);
 }
 
 function logInvalidGroupFolder(
@@ -158,6 +178,7 @@ export async function runScheduledTask(
   task: ScheduledTask,
   deps: SchedulerDependencies,
 ): Promise<void> {
+  const serviceStateVersion = getServiceStateVersion();
   const startTime = Date.now();
   let groupDir: string;
 
@@ -211,6 +232,17 @@ export async function runScheduledTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        if (
+          !isServiceEnabled() ||
+          getServiceStateVersion() !== serviceStateVersion
+        ) {
+          logger.info(
+            { taskId: task.id },
+            'Dropping scheduled task output because service was disabled mid-run',
+          );
+          return;
+        }
+
         if (streamedOutput.result) {
           result = streamedOutput.result;
           await deps.sendMessage(task.chat_jid, streamedOutput.result);
@@ -245,6 +277,19 @@ export async function runScheduledTask(
   }
 
   const durationMs = Date.now() - startTime;
+  if (getServiceStateVersion() !== serviceStateVersion) {
+    skipScheduledTask(
+      task,
+      'service disabled',
+      new Date(startTime).toISOString(),
+    );
+    logger.info(
+      { taskId: task.id, durationMs },
+      'Scheduled task cancelled because service was disabled',
+    );
+    return;
+  }
+
   logTaskRun({
     task_id: task.id,
     run_at: new Date().toISOString(),

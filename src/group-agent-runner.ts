@@ -9,6 +9,7 @@ import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import { resolveOutboundTarget } from './router.js';
+import { getServiceStateVersion, isServiceEnabled } from './service-state.js';
 import { RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
@@ -144,6 +145,7 @@ export async function processGroupMessages(
   chatJid: string,
   deps: ProcessGroupMessagesDeps,
 ): Promise<boolean> {
+  const serviceStateVersion = getServiceStateVersion();
   const group = deps.getRegisteredGroup(chatJid);
   if (!group) return true;
 
@@ -237,6 +239,17 @@ export async function processGroupMessages(
     chatJid,
     deps,
     async (result) => {
+      if (
+        !isServiceEnabled() ||
+        getServiceStateVersion() !== serviceStateVersion
+      ) {
+        logger.info(
+          { group: group.name },
+          'Dropping agent output because service was disabled mid-run',
+        );
+        return;
+      }
+
       if (result.result) {
         const raw =
           typeof result.result === 'string'
@@ -276,6 +289,14 @@ export async function processGroupMessages(
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
+    if (getServiceStateVersion() !== serviceStateVersion) {
+      logger.info(
+        { group: group.name },
+        'Service state changed mid-run, treating message work as cancelled',
+      );
+      return true;
+    }
+
     if (outputSentToUser) {
       logger.warn(
         { group: group.name },

@@ -1,10 +1,12 @@
 import { SCHEDULER_POLL_INTERVAL } from './config.js';
 import { getDueTasks, getTaskById } from './db.js';
 import { logger } from './logger.js';
+import { isServiceEnabled } from './service-state.js';
 import {
   computeNextRun,
   runScheduledTask,
   SchedulerDependencies,
+  skipScheduledTask,
 } from './task-execution.js';
 
 export { computeNextRun };
@@ -30,6 +32,11 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         // Re-check task status in case it was paused/cancelled
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
+          continue;
+        }
+
+        if (!isServiceEnabled()) {
+          skipScheduledTask(currentTask, 'service disabled');
           continue;
         }
 

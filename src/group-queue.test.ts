@@ -8,6 +8,28 @@ vi.mock('./config.js', () => ({
   MAX_CONCURRENT_CONTAINERS: 2,
 }));
 
+vi.mock('./container-runtime.js', () => ({
+  stopContainer: vi.fn((name: string) => `docker stop ${name}`),
+}));
+
+vi.mock('child_process', async () => {
+  const actual =
+    await vi.importActual<typeof import('child_process')>('child_process');
+  return {
+    ...actual,
+    exec: vi.fn(
+      (
+        _cmd: string,
+        _opts: unknown,
+        callback?: (err: Error | null) => void,
+      ) => {
+        callback?.(null);
+        return {} as any;
+      },
+    ),
+  };
+});
+
 // Mock fs operations used by sendMessage/closeStdin
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -26,6 +48,7 @@ describe('GroupQueue', () => {
   let queue: GroupQueue;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.useFakeTimers();
     queue = new GroupQueue();
   });
@@ -180,6 +203,19 @@ describe('GroupQueue', () => {
     expect(processMessages).not.toHaveBeenCalled();
   });
 
+  it('prevents new enqueues while the service is disabled', async () => {
+    const processMessages = vi.fn(async () => true);
+    queue.setProcessMessagesFn(processMessages);
+
+    await queue.setServiceEnabled(false);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueTask('group1@g.us', 'task-1', async () => {});
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(processMessages).not.toHaveBeenCalled();
+  });
+
   // --- Max retries exceeded ---
 
   it('stops retrying after MAX_RETRIES and resets', async () => {
@@ -241,6 +277,49 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
 
     expect(processed).toContain('group3@g.us');
+  });
+
+  it('clears queued work and kills active containers when the service is disabled', async () => {
+    let resolveRun: () => void;
+    const proc = { killed: false, kill: vi.fn() };
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        resolveRun = resolve;
+      });
+      return true;
+    });
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.registerProcess(
+      'group1@g.us',
+      proc as any,
+      'nanoclaw-group1',
+      'group1',
+    );
+
+    const queuedTask = vi.fn(async () => {});
+    queue.enqueueTask('group1@g.us', 'task-1', queuedTask);
+    queue.enqueueMessageCheck('group2@g.us');
+
+    await queue.setServiceEnabled(false);
+    resolveRun!();
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(
+      (
+        queue as unknown as {
+          waitingGroups: string[];
+        }
+      ).waitingGroups,
+    ).toEqual([]);
+    expect(queuedTask).not.toHaveBeenCalled();
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   // --- Running task dedup (Issue #138) ---

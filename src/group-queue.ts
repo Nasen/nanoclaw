@@ -1,8 +1,9 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -25,6 +26,7 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export class GroupQueue {
@@ -34,6 +36,7 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  private serviceEnabled = true;
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -49,6 +52,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        retryTimer: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -59,8 +63,37 @@ export class GroupQueue {
     this.processMessagesFn = fn;
   }
 
+  async setServiceEnabled(enabled: boolean): Promise<void> {
+    if (this.serviceEnabled === enabled) return;
+
+    this.serviceEnabled = enabled;
+    if (enabled) {
+      logger.info('GroupQueue resumed after service re-enable');
+      return;
+    }
+
+    this.waitingGroups = [];
+    const stopPromises: Promise<void>[] = [];
+
+    for (const [groupJid, state] of this.groups) {
+      state.pendingMessages = false;
+      state.pendingTasks = [];
+      state.retryCount = 0;
+      if (state.retryTimer) {
+        clearTimeout(state.retryTimer);
+        state.retryTimer = null;
+      }
+      if (state.process && !state.process.killed) {
+        stopPromises.push(this.stopActiveGroup(groupJid, state));
+      }
+    }
+
+    await Promise.all(stopPromises);
+    logger.info('GroupQueue paused for emergency service disable');
+  }
+
   enqueueMessageCheck(groupJid: string): void {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || !this.serviceEnabled) return;
 
     const state = this.getGroup(groupJid);
 
@@ -88,7 +121,7 @@ export class GroupQueue {
   }
 
   enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || !this.serviceEnabled) return;
 
     const state = this.getGroup(groupJid);
 
@@ -148,6 +181,7 @@ export class GroupQueue {
   notifyIdle(groupJid: string): void {
     const state = this.getGroup(groupJid);
     state.idleWaiting = true;
+    if (!this.serviceEnabled) return;
     if (state.pendingTasks.length > 0) {
       this.closeStdin(groupJid);
     }
@@ -159,6 +193,7 @@ export class GroupQueue {
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
+    if (!this.serviceEnabled) return false;
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
@@ -197,6 +232,8 @@ export class GroupQueue {
     groupJid: string,
     reason: 'messages' | 'drain',
   ): Promise<void> {
+    if (!this.serviceEnabled) return;
+
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
@@ -212,7 +249,9 @@ export class GroupQueue {
     try {
       if (this.processMessagesFn) {
         const success = await this.processMessagesFn(groupJid);
-        if (success) {
+        if (!this.serviceEnabled) {
+          state.retryCount = 0;
+        } else if (success) {
           state.retryCount = 0;
         } else {
           this.scheduleRetry(groupJid, state);
@@ -232,6 +271,8 @@ export class GroupQueue {
   }
 
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {
+    if (!this.serviceEnabled) return;
+
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
@@ -261,6 +302,8 @@ export class GroupQueue {
   }
 
   private scheduleRetry(groupJid: string, state: GroupState): void {
+    if (!this.serviceEnabled) return;
+
     state.retryCount++;
     if (state.retryCount > MAX_RETRIES) {
       logger.error(
@@ -276,15 +319,16 @@ export class GroupQueue {
       { groupJid, retryCount: state.retryCount, delayMs },
       'Scheduling retry with backoff',
     );
-    setTimeout(() => {
-      if (!this.shuttingDown) {
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null;
+      if (!this.shuttingDown && this.serviceEnabled) {
         this.enqueueMessageCheck(groupJid);
       }
     }, delayMs);
   }
 
   private drainGroup(groupJid: string): void {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || !this.serviceEnabled) return;
 
     const state = this.getGroup(groupJid);
 
@@ -318,7 +362,8 @@ export class GroupQueue {
   private drainWaiting(): void {
     while (
       this.waitingGroups.length > 0 &&
-      this.activeCount < MAX_CONCURRENT_CONTAINERS
+      this.activeCount < MAX_CONCURRENT_CONTAINERS &&
+      this.serviceEnabled
     ) {
       const nextJid = this.waitingGroups.shift()!;
       const state = this.getGroup(nextJid);
@@ -361,5 +406,46 @@ export class GroupQueue {
       { activeCount: this.activeCount, detachedContainers: activeContainers },
       'GroupQueue shutting down (containers detached, not killed)',
     );
+  }
+
+  private stopActiveGroup(groupJid: string, state: GroupState): Promise<void> {
+    const proc = state.process;
+    const containerName = state.containerName;
+
+    logger.warn(
+      { groupJid, containerName, runningTaskId: state.runningTaskId },
+      'Emergency service disable stopping active container',
+    );
+
+    return new Promise((resolve) => {
+      const killProcess = () => {
+        if (!proc || proc.killed) {
+          resolve();
+          return;
+        }
+
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+        resolve();
+      };
+
+      if (!containerName) {
+        killProcess();
+        return;
+      }
+
+      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+        if (err) {
+          logger.warn(
+            { groupJid, containerName, err },
+            'Graceful emergency stop failed, force killing process',
+          );
+        }
+        killProcess();
+      });
+    });
   }
 }

@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
+  _resetServiceStateForTests,
+  setRuntimeServiceEnabled,
+} from './service-state.js';
+import {
   _resetSchedulerLoopForTests,
   computeNextRun,
   startSchedulerLoop,
@@ -10,6 +14,7 @@ import {
 describe('task scheduler', () => {
   beforeEach(() => {
     _initTestDatabase();
+    _resetServiceStateForTests();
     _resetSchedulerLoopForTests();
     vi.useFakeTimers();
   });
@@ -50,6 +55,39 @@ describe('task scheduler', () => {
 
     const task = getTaskById('task-invalid-folder');
     expect(task?.status).toBe('paused');
+  });
+
+  it('skips due tasks while the service is disabled', async () => {
+    createTask({
+      id: 'task-disabled',
+      group_folder: 'test',
+      chat_jid: 'test@g.us',
+      prompt: 'run',
+      schedule_type: 'once',
+      schedule_value: '2026-02-22T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      status: 'active',
+      created_at: '2026-02-22T00:00:00.000Z',
+    });
+
+    setRuntimeServiceEnabled(false);
+    const enqueueTask = vi.fn();
+
+    startSchedulerLoop({
+      registeredGroups: () => ({}),
+      getSessions: () => ({}),
+      queue: { enqueueTask } as any,
+      onProcess: () => {},
+      sendMessage: async () => {},
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    const task = getTaskById('task-disabled');
+    expect(enqueueTask).not.toHaveBeenCalled();
+    expect(task?.status).toBe('completed');
+    expect(task?.last_result).toBe('Skipped: service disabled');
   });
 
   it('computeNextRun anchors interval tasks to scheduled time to prevent drift', () => {

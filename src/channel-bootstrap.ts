@@ -13,6 +13,7 @@ interface RingCentralBootstrapDeps {
   channels: Channel[];
   registeredGroups: () => Record<string, RegisteredGroup>;
   setAutoAssist: (enabled: boolean) => void;
+  setServiceEnabled: (enabled: boolean, chatJid: string) => Promise<void>;
   onRegisterGroup: (jid: string, group: RegisteredGroup) => void;
 }
 
@@ -73,6 +74,7 @@ export async function connectRingCentralChannels({
   channels,
   registeredGroups,
   setAutoAssist,
+  setServiceEnabled,
   onRegisterGroup,
 }: RingCentralBootstrapDeps): Promise<void> {
   const rcEnv = readEnvFile([
@@ -97,13 +99,19 @@ export async function connectRingCentralChannels({
         server: rcEnv.RC_SERVER,
       },
       onOwnerCommand: async (command) => {
-        if (command.action !== 'set_auto_assist') return;
-        setAutoAssist(command.value);
-        await confirmAutoAssistChange(
-          rcChannel,
-          registeredGroups(),
-          command.value,
-        );
+        if (command.action === 'set_auto_assist') {
+          setAutoAssist(command.value);
+          await confirmAutoAssistChange(
+            rcChannel,
+            registeredGroups(),
+            command.value,
+          );
+          return;
+        }
+
+        if (command.action === 'set_service_enabled') {
+          await setServiceEnabled(command.value, command.chatJid);
+        }
       },
     });
 

@@ -37,6 +37,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import {
+  consumePendingMessages,
   recoverPendingMessages as recoverPendingMessagesForGroups,
   startMessageLoop as startPollingMessageLoop,
 } from './message-loop.js';
@@ -50,6 +51,17 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import {
+  buildServiceToggleConfirmation,
+  buildUnauthorizedServiceControlMessage,
+  isAdminServiceControlGroup,
+  parseServiceToggleCommand,
+} from './service-control.js';
+import {
+  initializeServiceState,
+  isServiceEnabled,
+  setRuntimeServiceEnabled,
+} from './service-state.js';
 import {
   registerShutdownHandlers,
   startSubsystems,
@@ -67,13 +79,90 @@ let lastAgentTimestamp: Record<string, string> = {};
 // Auto-assist toggle for personal RC DMs — persisted in router_state DB.
 // OFF by default: Nasen handles his own DMs until he explicitly enables.
 let autoAssistEnabled = false;
+const SERVICE_ENABLED_KEY = 'service_enabled';
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+async function sendDirectControlMessage(
+  chatJid: string,
+  text: string,
+): Promise<void> {
+  const channel = channels.find((candidate) => candidate.ownsJid(chatJid));
+  if (!channel) {
+    logger.warn({ chatJid }, 'No channel found for control message');
+    return;
+  }
+  await channel.sendMessage(chatJid, text);
+}
+
+async function setServiceEnabled(
+  enabled: boolean,
+  reason: 'admin_chat' | 'owner_command',
+): Promise<boolean> {
+  const changed = setRuntimeServiceEnabled(enabled);
+
+  setRouterState(SERVICE_ENABLED_KEY, enabled ? 'true' : 'false');
+  logger.info({ enabled, changed, reason }, 'Service mode changed');
+  await queue.setServiceEnabled(enabled);
+
+  if (!enabled) {
+    consumePendingMessages(
+      registeredGroups,
+      (chatJid) => lastAgentTimestamp[chatJid] || '',
+      (chatJid, timestamp) => {
+        lastAgentTimestamp[chatJid] = timestamp;
+      },
+      saveState,
+    );
+  }
+
+  return changed;
+}
+
+function maybeHandleServiceControlMessage(
+  chatJid: string,
+  msg: NewMessage,
+): boolean {
+  const enabled = parseServiceToggleCommand(msg.content);
+  if (enabled === null) return false;
+
+  const group = registeredGroups[chatJid];
+  if (!isAdminServiceControlGroup(group)) {
+    if (isServiceEnabled()) {
+      void sendDirectControlMessage(
+        chatJid,
+        buildUnauthorizedServiceControlMessage(),
+      ).catch((err) =>
+        logger.error(
+          { chatJid, err },
+          'Failed to send unauthorized control reply',
+        ),
+      );
+    }
+    return true;
+  }
+
+  void setServiceEnabled(enabled, 'admin_chat')
+    .then((changed) =>
+      sendDirectControlMessage(
+        chatJid,
+        buildServiceToggleConfirmation(enabled, changed),
+      ),
+    )
+    .catch((err) =>
+      logger.error({ chatJid, err }, 'Failed to apply service control command'),
+    );
+  return true;
+}
+
 function buildChannelOpts(): ChannelOpts {
   return {
     onMessage: (chatJid: string, msg: NewMessage) => {
+      if (maybeHandleServiceControlMessage(chatJid, msg)) {
+        return;
+      }
+
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();
         if (
@@ -114,8 +203,13 @@ function loadState(): void {
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   autoAssistEnabled = getRouterState('auto_assist_enabled') === 'true';
+  initializeServiceState(getRouterState(SERVICE_ENABLED_KEY) !== 'false');
   logger.info(
-    { groupCount: Object.keys(registeredGroups).length, autoAssistEnabled },
+    {
+      groupCount: Object.keys(registeredGroups).length,
+      autoAssistEnabled,
+      serviceEnabled: isServiceEnabled(),
+    },
     'State loaded',
   );
 }
@@ -241,6 +335,18 @@ async function startMessageLoop(): Promise<void> {
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
+  if (!isServiceEnabled()) {
+    consumePendingMessages(
+      registeredGroups,
+      (chatJid) => lastAgentTimestamp[chatJid] || '',
+      (chatJid, timestamp) => {
+        lastAgentTimestamp[chatJid] = timestamp;
+      },
+      saveState,
+    );
+    return;
+  }
+
   recoverPendingMessagesForGroups(
     registeredGroups,
     (chatJid) => lastAgentTimestamp[chatJid] || '',
@@ -258,6 +364,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  await queue.setServiceEnabled(isServiceEnabled());
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(
@@ -273,6 +380,13 @@ async function main(): Promise<void> {
     channels,
     registeredGroups: () => registeredGroups,
     setAutoAssist,
+    setServiceEnabled: async (enabled, chatJid) => {
+      const changed = await setServiceEnabled(enabled, 'owner_command');
+      await sendDirectControlMessage(
+        chatJid,
+        buildServiceToggleConfirmation(enabled, changed),
+      );
+    },
     onRegisterGroup: (jid, group) => {
       registeredGroups[jid] = group;
     },

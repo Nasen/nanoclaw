@@ -4,6 +4,7 @@ import { GroupQueue } from './group-queue.js';
 import { groupNeedsTrigger, hasAllowedTrigger } from './message-gating.js';
 import { findChannel, formatMessages } from './router.js';
 import { loadSenderAllowlist } from './sender-allowlist.js';
+import { isServiceEnabled } from './service-state.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -78,6 +79,35 @@ function pipeOrEnqueueMessages(
   deps.queue.enqueueMessageCheck(chatJid);
 }
 
+function consumeMessagesWhileDisabled(
+  deps: MessageLoopDeps,
+  registeredGroups: Record<string, RegisteredGroup>,
+  messagesByGroup: Map<string, NewMessage[]>,
+): void {
+  let changed = false;
+
+  for (const [chatJid, groupMessages] of messagesByGroup) {
+    if (!registeredGroups[chatJid]) continue;
+
+    const pending = getMessagesSince(
+      chatJid,
+      deps.getLastAgentTimestamp(chatJid),
+      ASSISTANT_NAME,
+    );
+    const latest =
+      pending[pending.length - 1]?.timestamp ??
+      groupMessages[groupMessages.length - 1]?.timestamp;
+
+    if (!latest) continue;
+    deps.setLastAgentTimestamp(chatJid, latest);
+    changed = true;
+  }
+
+  if (changed) {
+    deps.saveState();
+  }
+}
+
 async function processPollingCycle(deps: MessageLoopDeps): Promise<void> {
   const registeredGroups = deps.registeredGroups();
   const jids = Object.keys(registeredGroups);
@@ -94,6 +124,15 @@ async function processPollingCycle(deps: MessageLoopDeps): Promise<void> {
   deps.saveState();
 
   const messagesByGroup = groupMessagesByChat(messages);
+  if (!isServiceEnabled()) {
+    consumeMessagesWhileDisabled(deps, registeredGroups, messagesByGroup);
+    logger.info(
+      { count: messages.length },
+      'Service disabled, consumed inbound messages without processing',
+    );
+    return;
+  }
+
   for (const [chatJid, groupMessages] of messagesByGroup) {
     const group = registeredGroups[chatJid];
     if (!group) continue;
@@ -134,6 +173,8 @@ export function recoverPendingMessages(
   getLastAgentTimestamp: (chatJid: string) => string,
   queue: GroupQueue,
 ): void {
+  if (!isServiceEnabled()) return;
+
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
     const pending = getMessagesSince(
       chatJid,
@@ -147,5 +188,30 @@ export function recoverPendingMessages(
       'Recovery: found unprocessed messages',
     );
     queue.enqueueMessageCheck(chatJid);
+  }
+}
+
+export function consumePendingMessages(
+  registeredGroups: Record<string, RegisteredGroup>,
+  getLastAgentTimestamp: (chatJid: string) => string,
+  setLastAgentTimestamp: (chatJid: string, timestamp: string) => void,
+  saveState: () => void,
+): void {
+  let changed = false;
+
+  for (const chatJid of Object.keys(registeredGroups)) {
+    const pending = getMessagesSince(
+      chatJid,
+      getLastAgentTimestamp(chatJid),
+      ASSISTANT_NAME,
+    );
+    if (pending.length === 0) continue;
+
+    setLastAgentTimestamp(chatJid, pending[pending.length - 1].timestamp);
+    changed = true;
+  }
+
+  if (changed) {
+    saveState();
   }
 }

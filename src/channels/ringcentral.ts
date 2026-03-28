@@ -793,7 +793,8 @@ export interface RingCentralChannelOpts {
    * Only the JWT/user channel (rc: prefix) should provide this callback.
    */
   onOwnerCommand?: (cmd: {
-    action: 'set_auto_assist';
+    action: 'set_auto_assist' | 'set_service_enabled';
+    chatJid: string;
     value: boolean;
   }) => Promise<void>;
   /** Explicit credentials. If omitted, reads from env (RC_CLIENT_ID, RC_CLIENT_SECRET, RC_JWT / RC_BOT_TOKEN). */
@@ -1550,6 +1551,21 @@ export class RingCentralChannel implements Channel {
         const enable = /enable|turn\s+on/i.test(toggleMatch[1]);
         await this.opts.onOwnerCommand({
           action: 'set_auto_assist',
+          chatJid: jid,
+          value: enable,
+        });
+        return; // do not store or route this message
+      }
+
+      const serviceMatch = text.match(
+        /^\s*(enable|disable|turn\s+on|turn\s+off)\s+(service|nanoclaw)\s*$/i,
+      );
+      const ownerControlGroup = this.opts.registeredGroups()[jid];
+      if (serviceMatch && ownerControlGroup?.folder === 'rc-personal') {
+        const enable = /enable|turn\s+on/i.test(serviceMatch[1]);
+        await this.opts.onOwnerCommand({
+          action: 'set_service_enabled',
+          chatJid: jid,
           value: enable,
         });
         return; // do not store or route this message
