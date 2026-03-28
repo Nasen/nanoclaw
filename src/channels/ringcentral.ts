@@ -25,6 +25,8 @@ const RcWsExtension = _require('@rc-ex/ws');
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
+  findChatParticipantsByName,
+  findChatsByPrefix,
   findChatsByQuery,
   findOpaqueChatsByPrefix,
   updateChatName,
@@ -344,6 +346,18 @@ function shouldRetryRcRead(err: unknown): boolean {
     /not found/i.test(message) ||
     /resource not found/i.test(message)
   );
+}
+
+function isRcNotFound(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /404/i.test(message) || /not found/i.test(message);
+}
+
+function extractPersonIdFromRef(ref: string): string | undefined {
+  const trimmed = ref.trim();
+  const mentionMatch = trimmed.match(/^!\[:Person\]\((\d+)\)$/i);
+  if (mentionMatch) return mentionMatch[1];
+  return /^\d+$/.test(trimmed) ? trimmed : undefined;
 }
 
 async function sendPost(
@@ -1182,30 +1196,125 @@ export class RingCentralChannel implements Channel {
         .filter(Boolean)
         .join(' ')
         .trim();
-
-      try {
-        const chat = await getOrCreateConversation(this.platform, [
-          this.botExtId,
-          candidateId,
-        ]);
-        if (!chat?.id) continue;
-        const summary = await this.buildChatSummary(
-          this.platform,
-          chat.id,
-          fullName || candidate.email || chat.name,
-          chat,
-        );
-        chats.set(summary.chatId, summary);
+      const existingMatches = await this.resolveOpaqueDirectChatsByMemberIds(
+        new Map([[candidateId, fullName || candidate.email || candidateId]]),
+        limit - chats.size,
+      );
+      for (const match of existingMatches) {
+        chats.set(match.chatId, match);
         if (chats.size >= limit) break;
-      } catch (err) {
-        logger.warn(
-          { err, candidateId, query },
-          'Failed to resolve RC direct conversation from directory entry',
-        );
       }
+      if (chats.size >= limit) break;
     }
 
     return Array.from(chats.values());
+  }
+
+  private async resolveConversationByMemberId(
+    memberId: string,
+    fallbackName?: string,
+  ): Promise<RcChatSummary | undefined> {
+    if (!this.platform || !this.botExtId) return undefined;
+    if (!memberId || memberId === this.botExtId) return undefined;
+
+    const conversation = await getOrCreateConversation(this.platform, [
+      memberId,
+    ]);
+    if (!conversation?.id) return undefined;
+
+    return this.buildChatSummary(
+      this.platform,
+      conversation.id,
+      fallbackName || conversation.name,
+      conversation,
+    );
+  }
+
+  private async resolveConversationForPersonName(
+    query: string,
+  ): Promise<RcChatSummary | undefined> {
+    if (!this.platform || !this.botExtId) return undefined;
+
+    const explicitPersonId = extractPersonIdFromRef(query);
+    if (explicitPersonId) {
+      return this.resolveConversationByMemberId(explicitPersonId);
+    }
+
+    const historyMatches = findChatParticipantsByName(query, {
+      jidPrefix: this.jidPrefix,
+      limit: 10,
+    });
+    for (const candidate of historyMatches) {
+      const candidateId = candidate.sender?.trim();
+      if (!candidateId || candidateId === this.botExtId) continue;
+
+      const fromHistory = await this.resolveConversationByMemberId(
+        candidateId,
+        candidate.sender_name || candidateId,
+      );
+      if (fromHistory) return fromHistory;
+    }
+
+    const candidates = await searchDirectoryEntries(this.platform, query, 10);
+    for (const candidate of candidates) {
+      if (candidate.status && candidate.status !== 'Enabled') continue;
+      const candidateId = candidate.id ? String(candidate.id) : undefined;
+      if (!candidateId || candidateId === this.botExtId) continue;
+
+      const fullName = [candidate.firstName, candidate.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      const fromDirectory = await this.resolveConversationByMemberId(
+        candidateId,
+        fullName || candidate.email || candidateId,
+      );
+      if (fromDirectory) return fromDirectory;
+    }
+
+    return undefined;
+  }
+
+  private async resolveOpaqueDirectChatsByMemberIds(
+    memberNames: Map<string, string>,
+    limit: number,
+  ): Promise<RcChatSummary[]> {
+    if (!this.platform || !this.botExtId || memberNames.size === 0) return [];
+
+    const matches: RcChatSummary[] = [];
+    const candidates = findChatsByPrefix(this.jidPrefix, 250).map((chat) => ({
+      jid: chat.jid,
+      chatId: this.normalizeChatId(chat.jid),
+      name: chat.name || chat.jid,
+    }));
+
+    for (const candidate of candidates) {
+      const detail = await getChat(this.platform, candidate.chatId);
+      if (detail?.type?.toLowerCase() !== 'direct') continue;
+
+      const otherMemberIds = (detail.members ?? [])
+        .map((member) => member.id?.trim())
+        .filter(
+          (memberId): memberId is string =>
+            !!memberId && memberId !== this.botExtId,
+        );
+
+      const matchedMemberId = otherMemberIds.find((memberId) =>
+        memberNames.has(memberId),
+      );
+      if (!matchedMemberId) continue;
+
+      const hydrated = await this.buildChatSummary(
+        this.platform,
+        candidate.chatId,
+        memberNames.get(matchedMemberId) ?? candidate.name,
+        detail,
+      );
+      matches.push(hydrated);
+      if (matches.length >= limit) break;
+    }
+
+    return matches;
   }
 
   private async searchOpaqueCachedChats(
@@ -1233,6 +1342,26 @@ export class RingCentralChannel implements Channel {
     }
 
     return matches;
+  }
+
+  private async resolveMessageHistoryDirectChats(
+    query: string,
+    limit: number,
+  ): Promise<RcChatSummary[]> {
+    if (!this.platform || !this.botExtId) return [];
+
+    const candidates = findChatParticipantsByName(query, {
+      jidPrefix: this.jidPrefix,
+      limit: Math.min(Math.max(limit * 3, 10), 25),
+    });
+    const candidateNames = new Map<string, string>();
+    for (const candidate of candidates) {
+      const candidateId = candidate.sender?.trim();
+      if (!candidateId || candidateId === this.botExtId) continue;
+      candidateNames.set(candidateId, candidate.sender_name || candidateId);
+    }
+
+    return this.resolveOpaqueDirectChatsByMemberIds(candidateNames, limit);
   }
 
   private async resolveDirectChatIdLookup(
@@ -1268,6 +1397,14 @@ export class RingCentralChannel implements Channel {
         if (directIdMatch) {
           return [directIdMatch];
         }
+      }
+
+      const messageHistoryMatches = await this.resolveMessageHistoryDirectChats(
+        trimmedQuery,
+        cappedLimit,
+      );
+      if (messageHistoryMatches.length > 0) {
+        return messageHistoryMatches;
       }
 
       const cachedChats = this.findCachedChats(trimmedQuery, cappedLimit);
@@ -1327,6 +1464,24 @@ export class RingCentralChannel implements Channel {
     return summaries;
   }
 
+  private async resolveKnownChatForAgent(
+    chatRef: string,
+  ): Promise<RcChatSummary | undefined> {
+    const trimmedRef = chatRef.trim();
+    if (!trimmedRef) return undefined;
+
+    if (this.looksLikeChatId(trimmedRef)) {
+      return (await this.resolveDirectChatIdLookup(trimmedRef)) ?? undefined;
+    }
+
+    return (
+      this.findCachedChats(trimmedRef, 1)[0] ??
+      (await this.searchOpaqueCachedChats(trimmedRef, 1))[0] ??
+      (await this.resolveMessageHistoryDirectChats(trimmedRef, 1))[0] ??
+      (await this.resolveDirectoryBackedDirectChats(trimmedRef, 1))[0]
+    );
+  }
+
   async readMessagesForAgent(
     chatRef: string,
     limit = 20,
@@ -1334,7 +1489,7 @@ export class RingCentralChannel implements Channel {
     if (!this.platform) throw new Error('RC channel is not connected');
 
     const cachedChat =
-      this.findCachedChats(chatRef, 1)[0] ??
+      (await this.resolveKnownChatForAgent(chatRef)) ??
       (!this.looksLikeChatId(chatRef)
         ? (await this.listChatsForAgent(chatRef, 1))[0]
         : undefined);
@@ -1372,23 +1527,52 @@ export class RingCentralChannel implements Channel {
   ): Promise<{ jid: string; chatId: string; postId?: string }> {
     if (!this.platform) throw new Error('RC channel is not connected');
 
-    const chatId = this.normalizeChatId(chatRef);
-    const {
-      platform: sendPlatform,
-      expectedCreatorId,
-      ownerId,
-    } = await this.getSendPlatform(chatId);
-    const postId = await sendPost(sendPlatform, chatId, text);
+    const explicitPersonId = extractPersonIdFromRef(chatRef);
+    let resolvedChat = explicitPersonId
+      ? await this.resolveConversationByMemberId(explicitPersonId)
+      : ((await this.resolveKnownChatForAgent(chatRef)) ??
+        (!this.looksLikeChatId(chatRef)
+          ? (await this.listChatsForAgent(chatRef, 1))[0]
+          : undefined));
+    if (!resolvedChat && !this.looksLikeChatId(chatRef)) {
+      throw new Error(`Unable to resolve RC chat: ${chatRef}`);
+    }
+
+    let chatId = this.normalizeChatId(resolvedChat?.jid ?? chatRef);
+    let sendContext = await this.getSendPlatform(chatId);
+    let postId: string | undefined;
+
+    try {
+      postId = await sendPost(sendContext.platform, chatId, text);
+    } catch (err) {
+      if (this.looksLikeChatId(chatRef) || !isRcNotFound(err)) {
+        throw err;
+      }
+
+      const freshConversation =
+        await this.resolveConversationForPersonName(chatRef);
+      if (!freshConversation) throw err;
+
+      resolvedChat = freshConversation;
+      chatId = this.normalizeChatId(freshConversation.jid);
+      sendContext = await this.getSendPlatform(chatId);
+      postId = await sendPost(sendContext.platform, chatId, text);
+    }
+
     if (postId) {
       this.trackSent(postId);
       const creatorId = await verifySentPostCreator(
-        sendPlatform,
+        sendContext.platform,
         chatId,
         postId,
       );
-      if (expectedCreatorId && creatorId && creatorId !== expectedCreatorId) {
+      if (
+        sendContext.expectedCreatorId &&
+        creatorId &&
+        creatorId !== sendContext.expectedCreatorId
+      ) {
         throw new Error(
-          `Bot-auth send resolved to creator ${creatorId}, expected ${expectedCreatorId}${ownerId ? ` (ownerId=${ownerId})` : ''}`,
+          `Bot-auth send resolved to creator ${creatorId}, expected ${sendContext.expectedCreatorId}${sendContext.ownerId ? ` (ownerId=${sendContext.ownerId})` : ''}`,
         );
       }
       logger.info(
@@ -1397,7 +1581,7 @@ export class RingCentralChannel implements Channel {
           postId,
           creatorId,
           connectedExtId: this.botExtId,
-          ownerId,
+          ownerId: sendContext.ownerId,
         },
         'RC sent post verification',
       );

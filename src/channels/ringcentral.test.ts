@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { _initTestDatabase, getAllChats, storeChatMetadata } from '../db.js';
+import {
+  _initTestDatabase,
+  getAllChats,
+  storeChatMetadata,
+  storeMessage,
+} from '../db.js';
 import { _listChatsPaginated, RingCentralChannel } from './ringcentral.js';
 
 beforeEach(() => {
@@ -178,7 +183,9 @@ describe('_listChatsPaginated', () => {
 });
 
 describe('RingCentralChannel.readMessagesForAgent', () => {
-  it('resolves an uncached DM by directory lookup before reading messages', async () => {
+  it('resolves an existing opaque DM by directory-backed lookup before reading messages', async () => {
+    storeChatMetadata('rc:99001', '2026-03-26T00:00:00.000Z');
+
     const channel = new RingCentralChannel({
       onMessage: vi.fn(),
       onChatMetadata: vi.fn(),
@@ -192,22 +199,6 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
 
     const platform = {
       get: vi.fn(async (path: string) => {
-        if (path === '/team-messaging/v1/chats') {
-          return {
-            json: async () => ({
-              records: [],
-            }),
-          };
-        }
-
-        if (path === '/team-messaging/v1/teams') {
-          return {
-            json: async () => ({
-              records: [],
-            }),
-          };
-        }
-
         if (path === '/restapi/v1.0/account/~/directory/entries') {
           return {
             json: async () => ({
@@ -223,6 +214,16 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
               paging: {
                 totalPages: 1,
               },
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/99001') {
+          return {
+            json: async () => ({
+              id: '99001',
+              type: 'Direct',
+              members: [{ id: '7001' }, { id: '860412020' }],
             }),
           };
         }
@@ -253,13 +254,92 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
 
         throw new Error(`Unexpected path: ${path}`);
       }),
-      post: vi.fn(async (path: string) => {
-        if (path === '/team-messaging/v1/conversations') {
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+    (
+      channel as unknown as { refreshPlatform: () => Promise<unknown> }
+    ).refreshPlatform = vi.fn(async () => platform);
+
+    await expect(
+      channel.readMessagesForAgent('john.lin@ringcentral.com', 5),
+    ).resolves.toMatchObject({
+      jid: 'rc:99001',
+      chatId: '99001',
+      name: 'John Lin',
+      messages: [
+        {
+          id: 'post-1',
+          text: 'hello from John',
+        },
+      ],
+    });
+  });
+
+  it('resolves a DM from local message history before RC chat search when reading messages', async () => {
+    storeChatMetadata('rc:77123', '2026-03-20T02:01:24.651Z');
+    storeChatMetadata(
+      'rcb:139807227910',
+      '2026-03-20T02:01:24.651Z',
+      'Jupiter-NC Automation Blade',
+      'rc',
+      true,
+    );
+    storeMessage({
+      id: 'jia-read-1',
+      chat_jid: 'rcb:139807227910',
+      sender: '4189132020',
+      sender_name: 'Jia Zhang',
+      content: 'hello from Jia',
+      timestamp: '2026-03-20T02:01:24.651Z',
+    });
+
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/77123') {
           return {
             json: async () => ({
-              id: '99001',
+              id: '77123',
               type: 'Direct',
-              members: [{ id: '7001' }, { id: '860412020' }],
+              members: [{ id: '4189132020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/persons/4189132020') {
+          return {
+            json: async () => ({
+              firstName: 'Jia',
+              lastName: 'Zhang',
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/77123/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-jia-1',
+                  text: 'hello from Jia',
+                  creatorId: '4189132020',
+                  creationTime: '2026-03-20T02:01:24.651Z',
+                },
+              ],
             }),
           };
         }
@@ -277,18 +357,28 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
     ).refreshPlatform = vi.fn(async () => platform);
 
     await expect(
-      channel.readMessagesForAgent('John Lin', 5),
+      channel.readMessagesForAgent('Jia Zhang', 5),
     ).resolves.toMatchObject({
-      jid: 'rc:99001',
-      chatId: '99001',
-      name: 'John Lin',
+      jid: 'rc:77123',
+      chatId: '77123',
+      name: 'Jia Zhang',
       messages: [
         {
-          id: 'post-1',
-          text: 'hello from John',
+          id: 'post-jia-1',
+          text: 'hello from Jia',
+          creatorName: 'Jia Zhang',
         },
       ],
     });
+
+    expect(platform.get).not.toHaveBeenCalledWith(
+      '/team-messaging/v1/chats',
+      expect.anything(),
+    );
+    expect(platform.get).not.toHaveBeenCalledWith(
+      '/restapi/v1.0/account/~/directory/entries',
+      expect.anything(),
+    );
   });
 
   it('hydrates opaque direct-chat names from the other member', async () => {
@@ -491,6 +581,267 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
         },
       ],
     });
+  });
+});
+
+describe('RingCentralChannel.sendMessageForAgent', () => {
+  it('resolves a cached DM name before sending a personal-authored RC message', async () => {
+    storeChatMetadata('rc:14711291906', '2026-03-05T03:30:41.621Z', 'John Lin');
+
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      post: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/14711291906/posts') {
+          return {
+            json: async () => ({
+              id: 'post-123',
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/14711291906/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-123',
+                  creatorId: '860412020',
+                  text: 'hi',
+                  creationTime: '2026-03-27T05:50:14.677Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected get path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(
+      channel.sendMessageForAgent('John Lin', 'hi'),
+    ).resolves.toMatchObject({
+      jid: 'rc:14711291906',
+      chatId: '14711291906',
+      postId: 'post-123',
+    });
+
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/14711291906/posts',
+      { text: 'hi' },
+    );
+  });
+
+  it('retries person-name sends with a live directory-backed conversation when a stale cached DM 404s', async () => {
+    storeChatMetadata('rc:14711291906', '2026-03-05T03:30:41.621Z', 'John Lin');
+
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      post: vi.fn(async (path: string, body?: unknown) => {
+        if (path === '/team-messaging/v1/chats/14711291906/posts') {
+          throw new Error('404 Not Found');
+        }
+
+        if (path === '/team-messaging/v1/conversations') {
+          expect(body).toEqual({
+            members: [{ id: '608081020' }],
+          });
+          return {
+            json: async () => ({
+              id: '22222',
+              type: 'Direct',
+              members: [{ id: '608081020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/22222/posts') {
+          return {
+            json: async () => ({
+              id: 'post-456',
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+      get: vi.fn(async (path: string) => {
+        if (path === '/restapi/v1.0/account/~/directory/entries') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: '608081020',
+                  firstName: 'John',
+                  lastName: 'Lin',
+                  status: 'Enabled',
+                  email: 'john.lin@ringcentral.com',
+                },
+              ],
+              paging: {
+                totalPages: 1,
+              },
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/persons/608081020') {
+          return {
+            json: async () => ({
+              firstName: 'John',
+              lastName: 'Lin',
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/22222/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-456',
+                  creatorId: '860412020',
+                  text: 'hi',
+                  creationTime: '2026-03-27T05:50:14.677Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected get path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(
+      channel.sendMessageForAgent('John Lin', 'hi'),
+    ).resolves.toMatchObject({
+      jid: 'rc:22222',
+      chatId: '22222',
+      postId: 'post-456',
+    });
+
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/14711291906/posts',
+      { text: 'hi' },
+    );
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/22222/posts',
+      { text: 'hi' },
+    );
+  });
+
+  it('sends a DM directly from a person mention/id without chat lookup', async () => {
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      post: vi.fn(async (path: string, body?: unknown) => {
+        if (path === '/team-messaging/v1/conversations') {
+          expect(body).toEqual({
+            members: [{ id: '608081020' }],
+          });
+          return {
+            json: async () => ({
+              id: '33333',
+              type: 'Direct',
+              members: [{ id: '608081020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/33333/posts') {
+          return {
+            json: async () => ({
+              id: 'post-789',
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/33333/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-789',
+                  creatorId: '860412020',
+                  text: 'hi',
+                  creationTime: '2026-03-27T05:50:14.677Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected get path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(
+      channel.sendMessageForAgent('![:Person](608081020)', 'hi'),
+    ).resolves.toMatchObject({
+      jid: 'rc:33333',
+      chatId: '33333',
+      postId: 'post-789',
+    });
+
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/conversations',
+      { members: [{ id: '608081020' }] },
+    );
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/33333/posts',
+      { text: 'hi' },
+    );
   });
 });
 
@@ -883,7 +1234,9 @@ describe('RingCentralChannel.listChatsForAgent', () => {
     ]);
   });
 
-  it('resolves an uncached DM by directory lookup', async () => {
+  it('resolves an existing opaque DM by directory lookup', async () => {
+    storeChatMetadata('rc:99001', '2026-03-26T00:00:00.000Z');
+
     const channel = new RingCentralChannel({
       onMessage: vi.fn(),
       onChatMetadata: vi.fn(),
@@ -897,22 +1250,6 @@ describe('RingCentralChannel.listChatsForAgent', () => {
 
     const platform = {
       get: vi.fn(async (path: string) => {
-        if (path === '/team-messaging/v1/chats') {
-          return {
-            json: async () => ({
-              records: [],
-            }),
-          };
-        }
-
-        if (path === '/team-messaging/v1/teams') {
-          return {
-            json: async () => ({
-              records: [],
-            }),
-          };
-        }
-
         if (path === '/restapi/v1.0/account/~/directory/entries') {
           return {
             json: async () => ({
@@ -932,24 +1269,21 @@ describe('RingCentralChannel.listChatsForAgent', () => {
           };
         }
 
-        if (path === '/team-messaging/v1/persons/7001') {
-          return {
-            json: async () => ({
-              firstName: 'John',
-              lastName: 'Lin',
-            }),
-          };
-        }
-
-        throw new Error(`Unexpected path: ${path}`);
-      }),
-      post: vi.fn(async (path: string) => {
-        if (path === '/team-messaging/v1/conversations') {
+        if (path === '/team-messaging/v1/chats/99001') {
           return {
             json: async () => ({
               id: '99001',
               type: 'Direct',
               members: [{ id: '7001' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/persons/7001') {
+          return {
+            json: async () => ({
+              firstName: 'John',
+              lastName: 'Lin',
             }),
           };
         }
@@ -963,7 +1297,9 @@ describe('RingCentralChannel.listChatsForAgent', () => {
       botExtId: '860412020',
     });
 
-    await expect(channel.listChatsForAgent('John Lin', 5)).resolves.toEqual([
+    await expect(
+      channel.listChatsForAgent('john.lin@ringcentral.com', 5),
+    ).resolves.toEqual([
       {
         jid: 'rc:99001',
         chatId: '99001',
@@ -1056,6 +1392,95 @@ describe('RingCentralChannel.listChatsForAgent', () => {
           name: 'Ian Zhang',
         }),
       ]),
+    );
+  });
+
+  it('resolves a DM from local message history before directory lookup', async () => {
+    storeChatMetadata('rc:77123', '2026-03-20T02:01:24.651Z');
+    storeChatMetadata(
+      'rcb:139807227910',
+      '2026-03-20T02:01:24.651Z',
+      'Jupiter-NC Automation Blade',
+      'rc',
+      true,
+    );
+    storeMessage({
+      id: 'jia-1',
+      chat_jid: 'rcb:139807227910',
+      sender: '4189132020',
+      sender_name: 'Jia Zhang',
+      content: 'hello from Jia',
+      timestamp: '2026-03-20T02:01:24.651Z',
+    });
+
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats') {
+          return {
+            json: async () => ({
+              records: [],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/teams') {
+          return {
+            json: async () => ({
+              records: [],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/77123') {
+          return {
+            json: async () => ({
+              id: '77123',
+              type: 'Direct',
+              members: [{ id: '4189132020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/persons/4189132020') {
+          return {
+            json: async () => ({
+              firstName: 'Jia',
+              lastName: 'Zhang',
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(channel.listChatsForAgent('Jia Zhang', 5)).resolves.toEqual([
+      {
+        jid: 'rc:77123',
+        chatId: '77123',
+        name: 'Jia Zhang',
+      },
+    ]);
+
+    expect(platform.get).not.toHaveBeenCalledWith(
+      '/restapi/v1.0/account/~/directory/entries',
+      expect.anything(),
     );
   });
 });

@@ -4,6 +4,7 @@ import {
   _initTestDatabase,
   createTask,
   deleteTask,
+  findChatParticipantsByName,
   findChatsByQuery,
   getAllChats,
   getAllRegisteredGroups,
@@ -363,6 +364,40 @@ describe('findChatsByQuery', () => {
 
     expect(chats).toHaveLength(1);
     expect(chats[0].name).toBe('Jupiter + NC CI Status');
+  });
+});
+
+describe('findChatParticipantsByName', () => {
+  it('finds RC participants from local message history by name', () => {
+    storeChatMetadata(
+      'rcb:139807227910',
+      '2026-03-20T02:01:24.651Z',
+      'Jupiter-NC Automation Blade',
+      'rc',
+      true,
+    );
+
+    store({
+      id: 'jia-1',
+      chat_jid: 'rcb:139807227910',
+      sender: '4189132020',
+      sender_name: 'Jia Zhang',
+      content: 'hello',
+      timestamp: '2026-03-20T02:01:24.651Z',
+    });
+
+    const participants = findChatParticipantsByName('Jia Zhang', {
+      jidPrefix: 'rcb:',
+      limit: 10,
+    });
+
+    expect(participants).toEqual([
+      {
+        sender: '4189132020',
+        sender_name: 'Jia Zhang',
+        last_message_time: '2026-03-20T02:01:24.651Z',
+      },
+    ]);
   });
 });
 

@@ -222,6 +222,12 @@ export interface ChatInfo {
   is_group: number;
 }
 
+export interface ChatParticipantInfo {
+  sender: string;
+  sender_name: string;
+  last_message_time: string;
+}
+
 /**
  * Get all known chats, ordered by most recent activity.
  */
@@ -318,6 +324,76 @@ export function findOpaqueChatsByPrefix(
     `,
     )
     .all(`${normalizedPrefix}%`, cappedLimit) as ChatInfo[];
+}
+
+export function findChatsByPrefix(jidPrefix: string, limit = 250): ChatInfo[] {
+  const normalizedPrefix = jidPrefix.trim().toLowerCase();
+  const cappedLimit = Math.max(limit, 1);
+
+  return db
+    .prepare(
+      `
+      SELECT jid, name, last_message_time, channel, is_group
+      FROM chats
+      WHERE lower(jid) LIKE ?
+      ORDER BY last_message_time DESC
+      LIMIT ?
+    `,
+    )
+    .all(`${normalizedPrefix}%`, cappedLimit) as ChatInfo[];
+}
+
+export function findChatParticipantsByName(
+  query: string,
+  options: {
+    jidPrefix?: string;
+    limit?: number;
+  } = {},
+): ChatParticipantInfo[] {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return [];
+
+  const normalizedQuery = trimmedQuery.toLowerCase();
+  const likeQuery = `%${normalizedQuery}%`;
+  const normalizedPrefix = (options.jidPrefix ?? '').toLowerCase();
+  const jidLikes =
+    normalizedPrefix === 'rc:' || normalizedPrefix === 'rcb:'
+      ? ['rc:%', 'rcb:%']
+      : [normalizedPrefix ? `${normalizedPrefix}%` : '%'];
+  const limit = Math.max(options.limit ?? 20, 1);
+
+  return db
+    .prepare(
+      `
+      SELECT
+        m.sender,
+        m.sender_name,
+        MAX(m.timestamp) AS last_message_time
+      FROM messages m
+      JOIN chats c ON c.jid = m.chat_jid
+      WHERE (${jidLikes.map(() => 'c.jid LIKE ?').join(' OR ')})
+        AND m.sender IS NOT NULL
+        AND m.sender != ''
+        AND m.is_from_me = 0
+        AND lower(COALESCE(m.sender_name, '')) LIKE ?
+      GROUP BY m.sender, m.sender_name
+      ORDER BY
+        CASE
+          WHEN lower(COALESCE(m.sender_name, '')) = ? THEN 0
+          WHEN lower(COALESCE(m.sender_name, '')) LIKE ? THEN 1
+          ELSE 2
+        END,
+        MAX(m.timestamp) DESC
+      LIMIT ?
+    `,
+    )
+    .all(
+      ...jidLikes,
+      likeQuery,
+      normalizedQuery,
+      `${normalizedQuery}%`,
+      limit,
+    ) as ChatParticipantInfo[];
 }
 
 /**
