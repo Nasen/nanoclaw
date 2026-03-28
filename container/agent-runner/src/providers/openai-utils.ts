@@ -15,8 +15,13 @@ const RC_STALE_HISTORY_PATTERNS = [
   /ringcentral chat lookup hit rate limits/i,
   /couldn.?t locate that exact team chat right now/i,
   /unable to complete this rc lookup/i,
+  /couldn.?t retrieve .*ringcentral lookup timed out/i,
+  /couldn.?t retrieve .*conversation .*timed out/i,
   /current tool environment/i,
   /no recent messages?.*available in that chat/i,
+  /no readable messages?.*available ringcentral history/i,
+  /recipient resolution didn.?t match .*personal auth context/i,
+  /ringcentral resolved the request to a different auth context/i,
 ];
 
 const SEND_ON_BEHALF_STALE_PATTERNS = [
@@ -34,6 +39,9 @@ const THIRD_PARTY_MCP_STALE_PATTERNS = [
   /don.?t have a direct .*gitlab.*(?:api )?tool available in this session/i,
   /don.?t have a direct .*jira.*(?:api )?tool available in this session/i,
 ];
+
+const EXPLICIT_ON_BEHALF_REQUEST_PATTERN =
+  /\b(on my behalf|on behalf of me|as me|reply as me|send as me|speak as me|use my personal (?:rc|ringcentral|account|credentials)|use my account|using my account|use my credentials|using my credentials|use personal credentials|from my account|via my account|via my personal rc|as nasen)\b/i;
 
 export function containsLegacyToolRefusal(text: string): boolean {
   return LEGACY_TOOL_REFUSAL_PATTERNS.some((pattern) => pattern.test(text));
@@ -101,15 +109,45 @@ export function buildTurnMessageDeduplicationKey(
     return [toolName, deliveryMode, sender, text].join('|');
   }
 
-  if (toolName === 'send_rc_message') {
+  if (toolName === 'send_rc_message' || toolName === 'send_rc_dm') {
     const chatId =
-      typeof args.chat_id === 'string' ? args.chat_id.trim().toLowerCase() : '';
+      typeof args.chat_id === 'string'
+        ? args.chat_id.trim().toLowerCase()
+        : typeof args.person === 'string'
+          ? args.person.trim().toLowerCase()
+          : '';
     if (!chatId) return null;
     const mode = typeof args.mode === 'string' ? args.mode : 'auto';
     return [toolName, chatId, mode, text].join('|');
   }
 
   return null;
+}
+
+export function hasExplicitOnBehalfRequest(prompt: string): boolean {
+  return EXPLICIT_ON_BEHALF_REQUEST_PATTERN.test(prompt);
+}
+
+export function normalizeSendToolArgsForPrompt(
+  toolName: string,
+  args: Record<string, unknown>,
+  prompt: string,
+): Record<string, unknown> {
+  if (
+    toolName !== 'send_message' &&
+    toolName !== 'send_rc_message' &&
+    toolName !== 'send_rc_dm'
+  ) {
+    return args;
+  }
+
+  if (!hasExplicitOnBehalfRequest(prompt)) return args;
+  if (args.on_behalf_intent === true) return args;
+
+  return {
+    ...args,
+    on_behalf_intent: true,
+  };
 }
 
 export function messagesSubstantiallyOverlap(a: string, b: string): boolean {

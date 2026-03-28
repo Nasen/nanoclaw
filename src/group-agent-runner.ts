@@ -8,6 +8,12 @@ import { getAllTasks } from './db.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
+import {
+  isRingCentralChatJid,
+  hasExplicitOnBehalfIntentInMessages,
+  resolveCurrentChatRcDelivery,
+} from './rc-delivery-policy.js';
 import { resolveOutboundTarget } from './router.js';
 import { getServiceStateVersion, isServiceEnabled } from './service-state.js';
 import { RegisteredGroup } from './types.js';
@@ -126,19 +132,9 @@ interface ProcessGroupMessagesDeps extends RunGroupAgentDeps {
 }
 
 function shouldUsePersonalRcDelivery(
-  chatJid: string,
   messages: Array<{ content: string; is_from_me?: boolean }>,
 ): boolean {
-  if (!chatJid.startsWith('rcb:')) return false;
-
-  const latestInbound = [...messages]
-    .reverse()
-    .find((message) => !message.is_from_me);
-  if (!latestInbound) return false;
-
-  return /\b(on my behalf|on behalf of me|as me|reply as me|send as me|speak as me|use my personal (?:rc|ringcentral|account|credentials)|use my credentials|using my credentials|use personal credentials|from my account|via my account|via my personal rc)\b/i.test(
-    latestInbound.content,
-  );
+  return hasExplicitOnBehalfIntentInMessages(messages);
 }
 
 export async function processGroupMessages(
@@ -189,16 +185,19 @@ export async function processGroupMessages(
       ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
       : '';
 
-  const usePersonalRcDelivery =
-    group.folder !== 'rc-personal' &&
-    shouldUsePersonalRcDelivery(chatJid, missedMessages);
+  const onBehalfIntent = shouldUsePersonalRcDelivery(missedMessages);
+  const deliveryDecision = resolveCurrentChatRcDelivery({
+    chatJid,
+    onBehalfIntent,
+  });
+  const usePersonalRcDelivery = deliveryDecision.mode === 'personal';
   const rcRoutingPrefix =
     chatJid.startsWith('rc:') || chatJid.startsWith('rcb:')
       ? group.folder === 'rc-personal'
-        ? '[RingCentral routing: For this chat, send_message should use delivery_mode="bot". Do not use personal delivery_mode in this session.]\n\n'
+        ? '[RingCentral routing: For this chat, normal replies use bot delivery by policy. Only explicit on-behalf requests should use personal delivery.]\n\n'
         : usePersonalRcDelivery
-          ? '[RingCentral routing: The latest user request asks you to act on Nasen\'s behalf. For outbound actions in this chat, prefer send_message with delivery_mode="personal".]\n\n'
-          : '[RingCentral routing: send_message supports delivery_mode="personal" for Nasen\'s personal RC app and delivery_mode="bot" for the bot app. Use personal when the user explicitly asks you to act as Nasen or use his personal RC account.]\n\n'
+          ? "[RingCentral routing: The latest user request explicitly asks you to act on Nasen's behalf. Outbound actions for this current chat must use personal delivery.]\n\n"
+          : '[RingCentral routing: Normal replies in RingCentral use bot delivery by policy. Personal delivery is only for explicit on-behalf requests.]\n\n'
       : '';
 
   const prompt =
@@ -261,15 +260,29 @@ export async function processGroupMessages(
           `Agent output: ${raw.slice(0, 200)}`,
         );
         if (text) {
+          if (deliveryDecision.policyForced && chatJid.startsWith('rc')) {
+            logger.info(
+              {
+                group: group.name,
+                requestedMode: 'auto',
+                enforcedMode: deliveryDecision.mode,
+              },
+              'Applied host-enforced RingCentral current-chat delivery policy',
+            );
+          }
           const target = resolveOutboundTarget(
             deps.channels,
             chatJid,
-            usePersonalRcDelivery ? 'personal' : 'auto',
+            deliveryDecision.mode,
           );
           if (!target) {
             throw new Error(`No channel for JID: ${chatJid}`);
           }
-          await target.channel.sendMessage(target.jid, text);
+          const outboundText =
+            isRingCentralChatJid(chatJid) && deliveryDecision.mode === 'personal'
+              ? formatOnBehalfAssistantMessage(text)
+              : text;
+          await target.channel.sendMessage(target.jid, outboundText);
           outputSentToUser = true;
         }
         resetIdleTimer();

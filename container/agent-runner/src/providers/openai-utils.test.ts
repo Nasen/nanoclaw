@@ -4,8 +4,10 @@ import {
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
   containsLegacyToolRefusal,
+  hasExplicitOnBehalfRequest,
   isSendConfirmation,
   messagesSubstantiallyOverlap,
+  normalizeSendToolArgsForPrompt,
   shouldDropAssistantHistory,
 } from './openai-utils.js';
 
@@ -91,5 +93,51 @@ describe('openai-utils', () => {
         mode: 'personal',
       }),
     );
+  });
+
+  it('detects explicit on-behalf phrasing in the latest user request', () => {
+    expect(
+      hasExplicitOnBehalfRequest(
+        'Send this to the Video team on my behalf using my account.',
+      ),
+    ).toBe(true);
+    expect(hasExplicitOnBehalfRequest('Send this to the Video team.')).toBe(
+      false,
+    );
+  });
+
+  it('adds on_behalf_intent to RC send tools for explicit on-behalf requests', () => {
+    expect(
+      normalizeSendToolArgsForPrompt(
+        'send_rc_message',
+        {
+          chat_id: 'rc:157530931206',
+          text: 'I will join in 5 minutes.',
+          mode: 'personal',
+        },
+        'Send this to the Video team on my behalf as me.',
+      ),
+    ).toEqual({
+      chat_id: 'rc:157530931206',
+      text: 'I will join in 5 minutes.',
+      mode: 'personal',
+      on_behalf_intent: true,
+    });
+  });
+
+  it('leaves normal RC send tool args unchanged without explicit on-behalf phrasing', () => {
+    const args = {
+      chat_id: 'rc:157530931206',
+      text: 'Build passed.',
+      mode: 'bot',
+    };
+
+    expect(
+      normalizeSendToolArgsForPrompt(
+        'send_rc_message',
+        args,
+        'Send this to the Video team.',
+      ),
+    ).toEqual(args);
   });
 });

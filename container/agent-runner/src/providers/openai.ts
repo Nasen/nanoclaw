@@ -13,6 +13,7 @@ import { AgentProvider, AgentTurnContext, AgentTurnResult } from '../types.js';
 import {
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
+  normalizeSendToolArgsForPrompt,
   shouldDropAssistantHistory,
 } from './openai-utils.js';
 import {
@@ -178,6 +179,23 @@ function shouldSkipHistoryForRcLookup(
   );
 }
 
+function isRcCrossChatSendRequest(prompt: string, rcChat: boolean): boolean {
+  if (!rcChat) return false;
+
+  const hasSendVerb = /\b(send|message|tell|reply|ping|dm)\b/i.test(prompt);
+  if (!hasSendVerb) return false;
+
+  return (
+    /on my behalf|my personal rc account|use my personal rc account|as nasen|as me/i.test(
+      prompt,
+    ) ||
+    /!\[:Person\]\(\d+\)/i.test(prompt) ||
+    /\bto\s+(?:!\[:Person\]\(\d+\)|rc[b]?:\d+|\d{6,}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/.test(
+      prompt,
+    )
+  );
+}
+
 function extractExplicitRcTarget(prompt: string): string | null {
   const mentionMatch = prompt.match(/!\[:(?:Team|Person)\]\((\d+)\)/i);
   if (mentionMatch) return mentionMatch[1];
@@ -203,6 +221,7 @@ function buildPrompt(
     context.containerInput.chatJid.startsWith('rc:') ||
     context.containerInput.chatJid.startsWith('rcb:');
   const explicitRcTarget = rcChat ? extractExplicitRcTarget(prompt) : null;
+  const crossChatRcSend = isRcCrossChatSendRequest(prompt, rcChat);
 
   const globalContext = loadGlobalContext(context.containerInput.isMain);
   if (globalContext) {
@@ -213,16 +232,17 @@ function buildPrompt(
   const extraDirsSummary = loadAdditionalDirectoriesSummary();
   if (extraDirsSummary) sections.push(extraDirsSummary);
 
-  const filteredHistory = shouldSkipHistoryForRcLookup(prompt, rcChat)
-    ? []
-    : history.filter(
-        (turn) =>
-          turn.role !== 'assistant' ||
-          !shouldDropAssistantHistory(turn.content, {
-            rcChat,
-            personalMode: !!context.containerInput.personalMode,
-          }),
-      );
+  const filteredHistory =
+    shouldSkipHistoryForRcLookup(prompt, rcChat) || crossChatRcSend
+      ? []
+      : history.filter(
+          (turn) =>
+            turn.role !== 'assistant' ||
+            !shouldDropAssistantHistory(turn.content, {
+              rcChat,
+              personalMode: !!context.containerInput.personalMode,
+            }),
+        );
 
   if (filteredHistory.length > 0) {
     sections.push('Conversation so far:');
@@ -249,22 +269,39 @@ function buildPrompt(
 
   if (rcChat) {
     toolInstructions.push(
-      'In RingCentral chats, send_message supports delivery_mode="personal" to send through Nasen\'s personal RC app/credentials, delivery_mode="bot" to send through the bot app, and delivery_mode="auto" for the default route.',
+      'In RingCentral chats, the host enforces bot delivery as the default for normal replies. Personal delivery is only allowed for explicit on-behalf requests.',
     );
     if (context.containerInput.chatJid === 'rcb:157530931206') {
       toolInstructions.push(
-        "In this rc-personal chat, RC lookup/read tools use Nasen's personal auth, while outbound replies must use bot delivery. Do not ask RC lookup tools to use bot mode here, and do not ask send_message or send_rc_message to use personal delivery here.",
+        "In this rc-personal chat, RC lookup/read tools use Nasen's personal auth. Normal replies stay on bot delivery by policy. Only explicit on-behalf requests should use personal delivery.",
       );
     }
     toolInstructions.push(
-      'When the user asks you to act as Nasen, reply on his behalf, send as him, or use his personal RingCentral account, prefer delivery_mode="personal".',
+      'When the user explicitly asks you to act as Nasen, reply on his behalf, send as him, or use his personal RingCentral account, set on_behalf_intent=true on the relevant RingCentral send tool. The host uses that flag to allow personal delivery.',
     );
     toolInstructions.push(
       'For RingCentral SDK operations across teams or DMs, use list_rc_chats, read_rc_messages, and send_rc_message instead of guessing from memory.',
     );
     toolInstructions.push(
-      'When the user asks for the latest message or a summary from a RingCentral team or DM by name, first call list_rc_chats to locate the chat, then call read_rc_messages on the matching chat. Do not rely on workspace files or old conversation history for live RC content when these tools are available.',
+      'If the user asks you to message another RingCentral person or DM someone on their behalf, do not use the generic current-chat send_message tool for that. Use send_rc_dm when the target is a person, or send_rc_message when the target is a specific RC chat/team.',
     );
+    toolInstructions.push(
+      'When the user asks for the latest message or a summary from a RingCentral team by name, call list_rc_chats to locate the chat, then call read_rc_messages on the matching chat. For a RingCentral DM by person name, call read_rc_messages with that person name directly first so the host can resolve the DM from cache/history without an extra chat listing step.',
+    );
+    toolInstructions.push(
+      'For RingCentral DM sends, prefer send_rc_dm with a person name, a person mention like ![:Person](123), or a person/user ID. Prefer those direct person references over generic chat search when the user names a person.',
+    );
+    toolInstructions.push(
+      'send_message is only for the current chat. For a different RC recipient, always use send_rc_dm or send_rc_message.',
+    );
+    toolInstructions.push(
+      'If you use send_message, send_rc_message, or send_rc_dm for an explicit on-behalf request, include on_behalf_intent=true. Do not set it for normal replies.',
+    );
+    if (crossChatRcSend) {
+      toolInstructions.push(
+        'For this turn, the user is asking you to send to a different RingCentral recipient. Do not use send_message. You must use send_rc_dm for a person target, or send_rc_message for an explicit RC chat/team target.',
+      );
+    }
     toolInstructions.push(
       'If the user provides a numeric RC chat/team ID, a full JID like rc:123, or a RingCentral mention like ![:Team](123), call read_rc_messages with that ID directly before trying list_rc_chats. Prefer the direct ID read over saying the chat is unavailable.',
     );
@@ -277,7 +314,10 @@ function buildPrompt(
       );
     }
     toolInstructions.push(
-      'If the user asks for messages "with <person name>" in RingCentral, treat it as a DM lookup. Prefer a direct DM/local-cache resolution path and avoid repeating list_rc_chats after earlier RC timeout or rate-limit failures shown in conversation history.',
+      'If the user asks for messages "with <person name>" in RingCentral, treat it as a DM lookup. Prefer calling read_rc_messages with the person name directly. Avoid repeating list_rc_chats after earlier RC timeout or rate-limit failures shown in conversation history.',
+    );
+    toolInstructions.push(
+      'The read_rc_messages tool accepts a DM person name directly in chat_id. For example, use chat_id="Jia Zhang" for a direct-message lookup instead of calling list_rc_chats first.',
     );
     toolInstructions.push(
       'Only say that an RC chat is unavailable after those RC tools return no match or an error, and mention the exact team name or ID you searched.',
@@ -1221,10 +1261,11 @@ async function runOpenAITurn(
   ).replace(/\/$/, '');
   const apiKey = context.agentEnv.OPENAI_API_KEY || '';
   const compiledPrompt = buildPrompt(state.history, context.prompt, context);
-  const explicitRcTarget =
-    (context.containerInput.chatJid.startsWith('rc:') ||
-      context.containerInput.chatJid.startsWith('rcb:')) &&
-    extractExplicitRcTarget(context.prompt);
+  const rcChat =
+    context.containerInput.chatJid.startsWith('rc:') ||
+    context.containerInput.chatJid.startsWith('rcb:');
+  const explicitRcTarget = rcChat && extractExplicitRcTarget(context.prompt);
+  const crossChatRcSend = isRcCrossChatSendRequest(context.prompt, rcChat);
 
   context.log(
     `Running OpenAI turn (session: ${sessionId}, model: ${model}, history: ${state.history.length})`,
@@ -1239,7 +1280,7 @@ async function runOpenAITurn(
     const tools = [
       ...getBuiltinToolDefinitions(),
       ...(mcp?.toolDefinitions || []),
-    ];
+    ].filter((tool) => !(crossChatRcSend && tool.name === 'send_message'));
     const conversationInput: unknown[] = [
       {
         type: 'message',
@@ -1251,7 +1292,9 @@ async function runOpenAITurn(
       model,
       input: conversationInput,
       tools,
-      ...(explicitRcTarget ? { tool_choice: 'required' } : {}),
+      ...(explicitRcTarget || crossChatRcSend
+        ? { tool_choice: 'required' }
+        : {}),
     };
     let payload: unknown;
     const sentMessages: string[] = [];
@@ -1300,6 +1343,11 @@ async function runOpenAITurn(
                   string,
                   unknown
                 >;
+                parsedArgs = normalizeSendToolArgsForPrompt(
+                  binding.mcpName,
+                  parsedArgs,
+                  context.prompt,
+                );
               } catch {
                 // Ignore malformed tool args; downstream handling will surface the error.
               }
@@ -1321,9 +1369,14 @@ async function runOpenAITurn(
               break;
             }
 
+            const effectiveArgs =
+              binding && parsedArgs
+                ? JSON.stringify(parsedArgs)
+                : call.arguments;
+
             output =
               binding && mcp
-                ? await runMcpTool(call.arguments, binding, mcp.clients)
+                ? await runMcpTool(effectiveArgs, binding, mcp.clients)
                 : JSON.stringify({
                     ok: false,
                     error: `Unsupported tool: ${call.name}`,
@@ -1333,7 +1386,8 @@ async function runOpenAITurn(
               binding &&
               parsedArgs &&
               (binding.mcpName === 'send_message' ||
-                binding.mcpName === 'send_rc_message')
+                binding.mcpName === 'send_rc_message' ||
+                binding.mcpName === 'send_rc_dm')
             ) {
               try {
                 const parsedOutput = JSON.parse(output) as { ok?: unknown };

@@ -348,7 +348,7 @@ server.registerTool(
   'send_message',
   {
     description:
-      "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. In personal-mode chats, this sends through the user's connected integration on their behalf in the current chat. You can call this multiple times.",
+      "Send a message to the current user or current chat immediately while you're still running. Use this for progress updates or multiple messages in the same chat. Do not use this to message a different RingCentral person or another RC chat; use send_rc_message or send_rc_dm for that.",
     inputSchema: {
       text: z.string().describe('The message text to send'),
       sender: z
@@ -363,15 +363,22 @@ server.registerTool(
         .describe(
           'Routing preference for the current chat. For RingCentral, "personal" uses Nasen\'s personal RC app/credentials, "bot" uses the RC bot app, and "auto" keeps the default route.',
         ),
+      on_behalf_intent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true only when the user explicitly asked you to act or send on Nasen's behalf. RingCentral personal delivery is host-enforced and requires this explicit intent.",
+        ),
     },
   },
   async (args) => {
-    const data: Record<string, string | undefined> = {
+    const data: Record<string, string | boolean | undefined> = {
       type: 'message',
       chatJid,
       text: args.text,
       sender: args.sender || undefined,
       deliveryMode: args.delivery_mode || 'auto',
+      onBehalfIntent: args.on_behalf_intent === true,
       groupFolder,
       timestamp: new Date().toISOString(),
     };
@@ -613,6 +620,12 @@ server.registerTool(
         .enum(['auto', 'personal', 'bot'])
         .default('auto')
         .describe('Which RC identity to use.'),
+      on_behalf_intent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true only when the user explicitly asked you to send on Nasen's behalf or use his personal account.",
+        ),
     },
   },
   async (args) => {
@@ -667,7 +680,9 @@ server.registerTool(
     inputSchema: {
       chat_id: z
         .string()
-        .describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+        .describe(
+          'RingCentral chat target: team/chat ID, full JID like rc:123 or rcb:123, RingCentral mention ID, or a DM person name such as "Jia Zhang".',
+        ),
       limit: z
         .number()
         .int()
@@ -679,6 +694,12 @@ server.registerTool(
         .enum(['auto', 'personal', 'bot'])
         .default('auto')
         .describe('Which RC identity to use.'),
+      on_behalf_intent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true only when the user explicitly asked you to send on Nasen's behalf or use his personal account.",
+        ),
     },
   },
   async (args) => {
@@ -729,12 +750,20 @@ server.registerTool(
     inputSchema: {
       chat_id: z
         .string()
-        .describe('RingCentral chat ID or full JID like rc:123 or rcb:123.'),
+        .describe(
+          'RingCentral target reference: chat ID, full JID like rc:123 or rcb:123, DM person name, or person mention/id like ![:Person](123) or 123.',
+        ),
       text: z.string().describe('Message text to send.'),
       mode: z
         .enum(['auto', 'personal', 'bot'])
         .default('auto')
         .describe('Which RC identity to use.'),
+      on_behalf_intent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true only when the user explicitly asked you to send on Nasen's behalf or use his personal account.",
+        ),
     },
   },
   async (args) => {
@@ -743,6 +772,7 @@ server.registerTool(
         chatId: args.chat_id,
         text: args.text,
         mode: args.mode,
+        onBehalfIntent: args.on_behalf_intent === true,
       });
       if (!response.ok) {
         return {
@@ -750,6 +780,71 @@ server.registerTool(
             {
               type: 'text' as const,
               text: String(response.error || 'Failed to send RC message.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.result ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'send_rc_dm',
+  {
+    description:
+      'Send a RingCentral direct message to a person. Use this when the target is an RC person/user rather than the current chat. The person may be identified by RC person ID, ![:Person](123) mention, or person name.',
+    inputSchema: {
+      person: z
+        .string()
+        .describe(
+          'RingCentral person identifier: person ID, ![:Person](123) mention, or person name.',
+        ),
+      text: z.string().describe('Message text to send.'),
+      mode: z
+        .enum(['auto', 'personal', 'bot'])
+        .default('auto')
+        .describe('Which RC identity to use.'),
+      on_behalf_intent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true only when the user explicitly asked you to send on Nasen's behalf or use his personal account.",
+        ),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask('rc_send_message', {
+        chatId: args.person,
+        text: args.text,
+        mode: args.mode,
+        onBehalfIntent: args.on_behalf_intent === true,
+      });
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to send RC DM.'),
             },
           ],
           isError: true,

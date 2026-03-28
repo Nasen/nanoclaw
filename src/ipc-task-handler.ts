@@ -5,6 +5,8 @@ import { CronExpressionParser } from 'cron-parser';
 import { GROUPS_DIR, TIMEZONE } from './config.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isPersonalFolder } from './rc-auto-register.js';
+import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
+import { resolveCrossChatRcDelivery } from './rc-delivery-policy.js';
 import { isValidGroupFolder, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -48,6 +50,7 @@ export interface TaskIpcData {
   title?: string;
   pageSize?: number;
   sources?: NotebookLmSourceInput[];
+  onBehalfIntent?: boolean;
 }
 
 export interface TaskIpcDeps {
@@ -179,14 +182,6 @@ function resolveRcLookupMode(
 ): RcDeliveryMode {
   if (sourceGroup === 'rc-personal') return 'personal';
   return resolveRcMode(sourceGroup, requested, autoDefault);
-}
-
-function resolveRcSendMode(
-  sourceGroup: string,
-  requested?: RcDeliveryMode,
-): RcDeliveryMode {
-  if (sourceGroup === 'rc-personal') return 'bot';
-  return resolveRcMode(sourceGroup, requested, 'bot');
 }
 
 function writeTaskResponse(
@@ -499,7 +494,6 @@ export async function processTaskIpc(
     }
 
     case 'rc_send_message': {
-      const mode = resolveRcSendMode(sourceGroup, data.mode);
       const chatRef = data.chatId || data.chatJid;
       if (!hasRcAccess(sourceGroup, isMain)) {
         writeTaskResponse(sourceGroup, data.requestId, {
@@ -515,9 +509,17 @@ export async function processTaskIpc(
         });
         break;
       }
+      const deliveryDecision = resolveCrossChatRcDelivery({
+        requestedMode: data.mode,
+        onBehalfIntent: data.onBehalfIntent === true,
+      });
+      const outboundText =
+        deliveryDecision.mode === 'personal'
+          ? formatOnBehalfAssistantMessage(data.text)
+          : data.text;
       try {
         const result = await withTimeout(
-          deps.rcSendMessage(chatRef, data.text, mode),
+          deps.rcSendMessage(chatRef, outboundText, deliveryDecision.mode),
           RC_IPC_TIMEOUT_MS,
           'rc_send_message',
         );
@@ -525,6 +527,17 @@ export async function processTaskIpc(
           ok: true,
           result,
         });
+        logger.info(
+          {
+            chatRef,
+            sourceGroup,
+            requestedMode: data.mode || 'auto',
+            mode: deliveryDecision.mode,
+            onBehalfIntent: data.onBehalfIntent === true,
+            policyForced: deliveryDecision.policyForced,
+          },
+          'Applied host-enforced RingCentral cross-chat delivery policy',
+        );
       } catch (err) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,

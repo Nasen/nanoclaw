@@ -755,6 +755,83 @@ describe('RingCentral IPC handlers', () => {
     expect(listMembers).toHaveBeenCalledWith('12345', 'bot', undefined);
   });
 
+  it('defaults rc_send_message to bot mode in rc-personal', async () => {
+    const sendMessage = vi.fn(async () => ({
+      jid: 'rc:12345',
+      chatId: '12345',
+    }));
+    deps.rcSendMessage = sendMessage;
+
+    await processTaskIpc(
+      {
+        type: 'rc_send_message',
+        chatId: '12345',
+        text: 'hello',
+        requestId: 'req-1',
+      },
+      'rc-personal',
+      false,
+      deps,
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith('12345', 'hello', 'bot');
+  });
+
+  it('honors explicit personal rc_send_message mode in rc-personal', async () => {
+    const sendMessage = vi.fn(async () => ({
+      jid: 'rc:12345',
+      chatId: '12345',
+    }));
+    deps.rcSendMessage = sendMessage;
+
+    await processTaskIpc(
+      {
+        type: 'rc_send_message',
+        chatId: '12345',
+        text: 'hello',
+        mode: 'personal',
+        onBehalfIntent: true,
+        requestId: 'req-2',
+      },
+      'rc-personal',
+      false,
+      deps,
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      '12345',
+      "[On Nasen's behalf] hello",
+      'personal',
+    );
+  });
+
+  it('honors explicit personal rc_send_message mode without host downgrade', async () => {
+    const sendMessage = vi.fn(async () => ({
+      jid: 'rc:12345',
+      chatId: '12345',
+    }));
+    deps.rcSendMessage = sendMessage;
+
+    await processTaskIpc(
+      {
+        type: 'rc_send_message',
+        chatId: '12345',
+        text: 'hello',
+        mode: 'personal',
+        requestId: 'req-3',
+      },
+      'rc-personal',
+      false,
+      deps,
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      '12345',
+      "[On Nasen's behalf] hello",
+      'personal',
+    );
+  });
+
   it('forwards contact payloads to RC contact creation', async () => {
     const createContact = vi.fn(async () => ({ id: 'contact-1' }));
     deps.rcCreateContact = createContact;
@@ -814,7 +891,7 @@ describe('RingCentral IPC handlers', () => {
         deps,
       );
 
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       await taskPromise;
 
       const responsePath = path.join(
@@ -830,7 +907,7 @@ describe('RingCentral IPC handlers', () => {
       };
 
       expect(response.ok).toBe(false);
-      expect(response.error).toContain('rc_list_chats timed out after 15000ms');
+      expect(response.error).toContain('rc_list_chats timed out after 60000ms');
     } finally {
       vi.useRealTimers();
     }

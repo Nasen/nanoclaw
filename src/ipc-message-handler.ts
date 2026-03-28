@@ -2,6 +2,11 @@ import fs from 'fs';
 import path from 'path';
 
 import { logger } from './logger.js';
+import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
+import {
+  isRingCentralChatJid,
+  resolveCurrentChatRcDelivery,
+} from './rc-delivery-policy.js';
 import { RcDeliveryMode, RegisteredGroup } from './types.js';
 
 interface MessageIpcDeps {
@@ -34,23 +39,35 @@ export async function processMessageFiles(
         chatJid?: string;
         text?: string;
         deliveryMode?: RcDeliveryMode;
+        onBehalfIntent?: boolean;
       };
 
       if (data.type === 'message' && data.chatJid && data.text) {
         const targetGroup = registeredGroups[data.chatJid];
         if (isMain || (targetGroup && targetGroup.folder === sourceGroup)) {
-          const effectiveDeliveryMode =
-            sourceGroup === 'rc-personal' ? 'bot' : data.deliveryMode || 'auto';
+          const deliveryDecision = resolveCurrentChatRcDelivery({
+            chatJid: data.chatJid,
+            requestedMode: data.deliveryMode,
+            onBehalfIntent: data.onBehalfIntent === true,
+          });
+          const outboundText =
+            isRingCentralChatJid(data.chatJid) &&
+            deliveryDecision.mode === 'personal'
+              ? formatOnBehalfAssistantMessage(data.text)
+              : data.text;
           await deps.sendMessage(
             data.chatJid,
-            data.text,
-            effectiveDeliveryMode,
+            outboundText,
+            deliveryDecision.mode,
           );
           logger.info(
             {
               chatJid: data.chatJid,
               sourceGroup,
-              deliveryMode: effectiveDeliveryMode,
+              requestedMode: data.deliveryMode || 'auto',
+              deliveryMode: deliveryDecision.mode,
+              onBehalfIntent: data.onBehalfIntent === true,
+              policyForced: deliveryDecision.policyForced,
             },
             'IPC message sent',
           );
