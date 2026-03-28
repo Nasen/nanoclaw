@@ -13,8 +13,8 @@ describe('on-behalf-message', () => {
   });
 
   it('does not double-prefix already marked text', () => {
-    expect(
-      formatOnBehalfAssistantMessage(`${ON_BEHALF_PREFIX}hello`),
-    ).toBe(`${ON_BEHALF_PREFIX}hello`);
+    expect(formatOnBehalfAssistantMessage(`${ON_BEHALF_PREFIX}hello`)).toBe(
+      `${ON_BEHALF_PREFIX}hello`,
+    );
   });
 });

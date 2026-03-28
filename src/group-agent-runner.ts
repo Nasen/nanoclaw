@@ -279,7 +279,8 @@ export async function processGroupMessages(
             throw new Error(`No channel for JID: ${chatJid}`);
           }
           const outboundText =
-            isRingCentralChatJid(chatJid) && deliveryDecision.mode === 'personal'
+            isRingCentralChatJid(chatJid) &&
+            deliveryDecision.mode === 'personal'
               ? formatOnBehalfAssistantMessage(text)
               : text;
           await target.channel.sendMessage(target.jid, outboundText);
