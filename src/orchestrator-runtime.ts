@@ -23,7 +23,6 @@ import { Channel, RcDeliveryMode, RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
 type RegisteredGroupsGetter = () => Record<string, RegisteredGroup>;
-type SessionsGetter = () => Record<string, string>;
 type AvailableGroupsGetter =
   () => import('./container-runner.js').AvailableGroup[];
 
@@ -252,7 +251,6 @@ interface StartSubsystemsOptions {
   channels: Channel[];
   queue: GroupQueue;
   registeredGroups: RegisteredGroupsGetter;
-  getSessions: SessionsGetter;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   getAvailableGroups: AvailableGroupsGetter;
   processGroupMessages: (chatJid: string) => Promise<boolean>;
@@ -264,7 +262,6 @@ export function startSubsystems({
   channels,
   queue,
   registeredGroups,
-  getSessions,
   registerGroup,
   getAvailableGroups,
   processGroupMessages,
@@ -273,7 +270,6 @@ export function startSubsystems({
 }: StartSubsystemsOptions): void {
   startSchedulerLoop({
     registeredGroups,
-    getSessions,
     queue,
     onProcess: (
       groupJid: string,

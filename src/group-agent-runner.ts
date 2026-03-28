@@ -28,8 +28,6 @@ interface AvailableGroup {
 
 interface RunGroupAgentDeps {
   queue: GroupQueue;
-  getSessionId: (groupFolder: string) => string | undefined;
-  setSessionId: (groupFolder: string, sessionId: string) => void;
   getAvailableGroups: () => AvailableGroup[];
   getRegisteredJids: () => Set<string>;
 }
@@ -54,7 +52,6 @@ export async function runGroupAgent(
 ): Promise<'success' | 'error'> {
   const isMain =
     group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
-  const sessionId = deps.getSessionId(group.folder);
 
   const tasks = getAllTasks();
   writeTasksSnapshot(
@@ -80,9 +77,6 @@ export async function runGroupAgent(
 
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
-          deps.setSessionId(group.folder, output.newSessionId);
-        }
         await onOutput(output);
       }
     : undefined;
@@ -92,7 +86,6 @@ export async function runGroupAgent(
       group,
       {
         prompt,
-        sessionId,
         groupFolder: group.folder,
         chatJid,
         isMain,
@@ -102,10 +95,6 @@ export async function runGroupAgent(
         deps.queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
-
-    if (output.newSessionId) {
-      deps.setSessionId(group.folder, output.newSessionId);
-    }
 
     if (output.status === 'error') {
       logger.error(

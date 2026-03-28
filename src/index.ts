@@ -26,12 +26,10 @@ import {
 import {
   getAllChats,
   getAllRegisteredGroups,
-  getAllSessions,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
-  setSession,
   storeChatMetadata,
   storeMessage,
 } from './db.js';
@@ -73,7 +71,6 @@ import { logger } from './logger.js';
 export { escapeXml, formatMessages } from './router.js';
 
 let lastTimestamp = '';
-let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 // Auto-assist toggle for personal RC DMs — persisted in router_state DB.
@@ -200,7 +197,6 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   autoAssistEnabled = getRouterState('auto_assist_enabled') === 'true';
   initializeServiceState(getRouterState(SERVICE_ENABLED_KEY) !== 'false');
@@ -279,11 +275,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     saveState,
     autoAssistEnabled: () => autoAssistEnabled,
-    getSessionId: (groupFolder) => sessions[groupFolder],
-    setSessionId: (groupFolder, sessionId) => {
-      sessions[groupFolder] = sessionId;
-      setSession(groupFolder, sessionId);
-    },
     getAvailableGroups,
     getRegisteredJids: () => new Set(Object.keys(registeredGroups)),
   });
@@ -301,11 +292,6 @@ async function runAgent(
     chatJid,
     {
       queue,
-      getSessionId: (groupFolder) => sessions[groupFolder],
-      setSessionId: (groupFolder, sessionId) => {
-        sessions[groupFolder] = sessionId;
-        setSession(groupFolder, sessionId);
-      },
       getAvailableGroups,
       getRegisteredJids: () => new Set(Object.keys(registeredGroups)),
     },
@@ -401,7 +387,6 @@ async function main(): Promise<void> {
     channels,
     queue,
     registeredGroups: () => registeredGroups,
-    getSessions: () => sessions,
     registerGroup,
     getAvailableGroups,
     processGroupMessages,

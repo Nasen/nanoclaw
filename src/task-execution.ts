@@ -61,7 +61,6 @@ export function computeNextRun(task: ScheduledTask): string | null {
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
-  getSessions: () => Record<string, string>;
   queue: GroupQueue;
   onProcess: (
     groupJid: string,
@@ -208,10 +207,6 @@ export async function runScheduledTask(
 
   let result: string | null = null;
   let error: string | null = null;
-  const sessionId =
-    task.context_mode === 'group'
-      ? deps.getSessions()[task.group_folder]
-      : undefined;
   const { scheduleClose, clearCloseTimer } = createCloseSchedulerTaskContainer(
     task,
     deps.queue,
@@ -222,7 +217,6 @@ export async function runScheduledTask(
       group,
       {
         prompt: task.prompt,
-        sessionId,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain: group.isMain === true,
