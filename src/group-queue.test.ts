@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 import { GroupQueue } from './group-queue.js';
+import { logger } from './logger.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
@@ -10,6 +11,15 @@ vi.mock('./config.js', () => ({
 
 vi.mock('./container-runtime.js', () => ({
   stopContainer: vi.fn((name: string) => `docker stop ${name}`),
+}));
+
+vi.mock('./logger.js', () => ({
+  logger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 vi.mock('child_process', async () => {
@@ -182,11 +192,6 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(5000);
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(2);
-
-    // Second retry after 10000ms (BASE_RETRY_MS * 2^1)
-    await vi.advanceTimersByTimeAsync(10000);
-    await vi.advanceTimersByTimeAsync(10);
-    expect(callCount).toBe(3);
   });
 
   // --- Shutdown prevents new enqueues ---
@@ -229,22 +234,29 @@ describe('GroupQueue', () => {
     queue.setProcessMessagesFn(processMessages);
     queue.enqueueMessageCheck('group1@g.us');
 
-    // Run through all 5 retries (MAX_RETRIES = 5)
+    // Run through the single retry (MAX_RETRIES = 1)
     // Initial call
     await vi.advanceTimersByTimeAsync(10);
     expect(callCount).toBe(1);
 
-    // Retry 1: 5000ms, Retry 2: 10000ms, Retry 3: 20000ms, Retry 4: 40000ms, Retry 5: 80000ms
-    const retryDelays = [5000, 10000, 20000, 40000, 80000];
+    const retryDelays = [5000];
     for (let i = 0; i < retryDelays.length; i++) {
       await vi.advanceTimersByTimeAsync(retryDelays[i] + 10);
       expect(callCount).toBe(i + 2);
     }
 
-    // After 5 retries (6 total calls), should stop — no more retries
+    // After 1 retry (2 total calls), should stop — no more retries
     const countAfterMaxRetries = callCount;
     await vi.advanceTimersByTimeAsync(200000); // Wait a long time
     expect(callCount).toBe(countAfterMaxRetries);
+    expect(logger.error).toHaveBeenCalledWith(
+      {
+        groupJid: 'group1@g.us',
+        retryCount: 1,
+        failedAttempts: 2,
+      },
+      'Max retries exceeded, dropping messages (will retry on next incoming message)',
+    );
   });
 
   // --- Waiting groups get drained when slots free up ---

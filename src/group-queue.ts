@@ -12,7 +12,7 @@ interface QueuedTask {
   fn: () => Promise<void>;
 }
 
-const MAX_RETRIES = 5;
+const MAX_RETRIES = 1;
 const BASE_RETRY_MS = 5000;
 
 interface GroupState {
@@ -304,15 +304,21 @@ export class GroupQueue {
   private scheduleRetry(groupJid: string, state: GroupState): void {
     if (!this.serviceEnabled) return;
 
-    state.retryCount++;
-    if (state.retryCount > MAX_RETRIES) {
+    const nextRetryCount = state.retryCount + 1;
+    if (nextRetryCount > MAX_RETRIES) {
       logger.error(
-        { groupJid, retryCount: state.retryCount },
+        {
+          groupJid,
+          retryCount: MAX_RETRIES,
+          failedAttempts: nextRetryCount,
+        },
         'Max retries exceeded, dropping messages (will retry on next incoming message)',
       );
       state.retryCount = 0;
       return;
     }
+
+    state.retryCount = nextRetryCount;
 
     const delayMs = BASE_RETRY_MS * Math.pow(2, state.retryCount - 1);
     logger.info(
