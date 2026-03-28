@@ -40,11 +40,24 @@ const THIRD_PARTY_MCP_STALE_PATTERNS = [
   /don.?t have a direct .*jira.*(?:api )?tool available in this session/i,
 ];
 
+const MCP_SERVER_LABELS: Record<string, string> = {
+  atlassian: 'Jira/Atlassian',
+  figma: 'Figma',
+  gitlab: 'GitLab',
+  gmail: 'Gmail',
+  m365: 'M365',
+  nanoclaw: 'NanoClaw',
+};
+
 const EXPLICIT_ON_BEHALF_REQUEST_PATTERN =
   /\b(on my behalf|on behalf of me|as me|reply as me|send as me|speak as me|use my personal (?:rc|ringcentral|account|credentials)|use my account|using my account|use my credentials|using my credentials|use personal credentials|from my account|via my account|via my personal rc|as nasen)\b/i;
 
 export function containsLegacyToolRefusal(text: string): boolean {
   return LEGACY_TOOL_REFUSAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function containsThirdPartyMcpRefusal(text: string): boolean {
+  return THIRD_PARTY_MCP_STALE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export function shouldDropAssistantHistory(
@@ -128,6 +141,19 @@ export function hasExplicitOnBehalfRequest(prompt: string): boolean {
   return EXPLICIT_ON_BEHALF_REQUEST_PATTERN.test(prompt);
 }
 
+export function extractJiraIssueKey(prompt: string): string | null {
+  const match = prompt.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
+  return match ? match[1].toUpperCase() : null;
+}
+
+export function isDirectJiraIssueLookupRequest(prompt: string): boolean {
+  const issueKey = extractJiraIssueKey(prompt);
+  if (!issueKey) return false;
+
+  const normalized = prompt.toLowerCase();
+  return /\b(jira|ticket|issue|bug|story|task)\b/.test(normalized);
+}
+
 export function normalizeSendToolArgsForPrompt(
   toolName: string,
   args: Record<string, unknown>,
@@ -148,6 +174,36 @@ export function normalizeSendToolArgsForPrompt(
     ...args,
     on_behalf_intent: true,
   };
+}
+
+export function buildMcpConnectionFailureMessage(
+  connectionErrors: Array<{
+    serverName: string;
+    error: string;
+  }>,
+): string | null {
+  const uniqueFailures = Array.from(
+    new Map(
+      connectionErrors
+        .map(({ serverName, error }) => [serverName, error.trim()] as const)
+        .filter(
+          ([serverName, error]) => serverName !== 'nanoclaw' && error.length > 0,
+        ),
+    ).entries(),
+  );
+
+  if (uniqueFailures.length === 0) return null;
+
+  const formatted = uniqueFailures.map(
+    ([serverName, error]) =>
+      `${MCP_SERVER_LABELS[serverName] || serverName} (${error})`,
+  );
+
+  if (formatted.length === 1) {
+    return `I couldn't complete that because the required connector failed to initialize: ${formatted[0]}.`;
+  }
+
+  return `I couldn't complete that because required connectors failed to initialize: ${formatted.join('; ')}.`;
 }
 
 export function messagesSubstantiallyOverlap(a: string, b: string): boolean {

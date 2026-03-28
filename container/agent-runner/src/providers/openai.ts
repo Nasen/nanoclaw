@@ -11,8 +11,12 @@ import { z } from 'zod';
 
 import { AgentProvider, AgentTurnContext, AgentTurnResult } from '../types.js';
 import {
+  buildMcpConnectionFailureMessage,
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
+  containsThirdPartyMcpRefusal,
+  extractJiraIssueKey,
+  isDirectJiraIssueLookupRequest,
   normalizeSendToolArgsForPrompt,
   shouldDropAssistantHistory,
 } from './openai-utils.js';
@@ -66,7 +70,7 @@ const MAX_TOOL_OUTPUT_CHARS = 120_000;
 const MAX_OPENAI_EXTERNAL_MCP_TOOLS = 5;
 const MAX_OPENAI_HISTORY_TURNS = 24;
 const MAX_OPENAI_HISTORY_CHARS = 24_000;
-const MAX_OPENAI_RESPONSE_RETRIES = 2;
+const MAX_OPENAI_RESPONSE_RETRIES = 3;
 const OPENAI_RETRY_DELAY_MS = 1500;
 const execFileAsync = promisify(execFile);
 const DEFAULT_WEB_TIMEOUT_MS = 45_000;
@@ -193,6 +197,12 @@ function isRcCrossChatSendRequest(prompt: string, rcChat: boolean): boolean {
     /\bto\s+(?:!\[:Person\]\(\d+\)|rc[b]?:\d+|\d{6,}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/.test(
       prompt,
     )
+  );
+}
+
+function shouldExposeCurrentChatSendTool(prompt: string): boolean {
+  return /\b(send|reply|respond|follow\s+up|post|tell|notify|ping)\b/i.test(
+    prompt,
   );
 }
 
@@ -600,6 +610,41 @@ function selectGmailToolsForPrompt(
   return selected.length > 0 ? selected : tools;
 }
 
+function selectAtlassianToolsForPrompt(
+  tools: McpListedTool[],
+  prompt: string,
+): McpListedTool[] {
+  const issueKey = extractJiraIssueKey(prompt);
+  if (!issueKey) return tools;
+
+  const requiredToolNames = ['jira_get_issue', 'jira_search'];
+  const requiredTools = requiredToolNames
+    .map((name) => tools.find((tool) => tool.name === name))
+    .filter((tool): tool is McpListedTool => tool !== undefined);
+
+  if (requiredTools.length === 0) return tools;
+
+  const promptTokens = getPromptTokens(prompt);
+  const rankedRemaining = tools
+    .map((tool, index) => ({
+      tool,
+      index,
+      score: scoreToolForPrompt(tool, promptTokens),
+    }))
+    .filter((entry) => !requiredToolNames.includes(entry.tool.name))
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  return [
+    ...requiredTools,
+    ...rankedRemaining
+      .slice(
+        0,
+        Math.max(0, MAX_OPENAI_EXTERNAL_MCP_TOOLS - requiredTools.length),
+      )
+      .map((entry) => entry.tool),
+  ];
+}
+
 function selectOpenAiToolsForPrompt(
   serverName: string,
   tools: McpListedTool[],
@@ -613,6 +658,8 @@ function selectOpenAiToolsForPrompt(
   const candidateTools =
     serverName === 'gmail'
       ? selectGmailToolsForPrompt(tools, promptTokens)
+      : serverName === 'atlassian'
+        ? selectAtlassianToolsForPrompt(tools, prompt)
       : tools;
   const ranked = candidateTools
     .map((tool, index) => ({
@@ -639,6 +686,171 @@ function selectOpenAiToolsForPrompt(
   );
 
   return selected;
+}
+
+function tryParseJson<T>(value: string): T | null {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+function extractNestedStringField(
+  value: unknown,
+  candidateKeys: string[],
+): string | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const visited = new Set<object>();
+  const queue: unknown[] = [value];
+  const normalizedCandidates = new Set(
+    candidateKeys.map((key) => key.toLowerCase()),
+  );
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object') continue;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    const record = current as Record<string, unknown>;
+    for (const [key, fieldValue] of Object.entries(record)) {
+      const normalizedKey = key.toLowerCase();
+      if (!normalizedCandidates.has(normalizedKey)) {
+        if (fieldValue && typeof fieldValue === 'object') {
+          queue.push(fieldValue);
+        }
+        continue;
+      }
+
+      if (typeof fieldValue === 'string' && fieldValue.trim()) {
+        return fieldValue.trim();
+      }
+
+      if (fieldValue && typeof fieldValue === 'object') {
+        const nested = fieldValue as Record<string, unknown>;
+        for (const nestedKey of ['name', 'displayName', 'value', 'text']) {
+          if (
+            typeof nested[nestedKey] === 'string' &&
+            nested[nestedKey].trim()
+          ) {
+            return nested[nestedKey].trim();
+          }
+        }
+        queue.push(fieldValue);
+      }
+    }
+  }
+
+  return null;
+}
+
+function summarizeDirectJiraIssueOutput(
+  toolOutput: string,
+  issueKey: string,
+): string | null {
+  const parsedToolOutput = tryParseJson<{
+    ok?: boolean;
+    is_error?: boolean;
+    output?: string;
+  }>(toolOutput);
+
+  if (!parsedToolOutput || parsedToolOutput.ok !== true) {
+    return null;
+  }
+
+  const rawOutput = parsedToolOutput.output?.trim();
+  if (!rawOutput) return null;
+
+  const structured = tryParseJson<unknown>(rawOutput);
+  if (!structured) return rawOutput;
+
+  const status =
+    extractNestedStringField(structured, ['status']) || 'Unknown status';
+  const summary = extractNestedStringField(structured, ['summary']);
+  const assignee = extractNestedStringField(structured, ['assignee']);
+  const priority = extractNestedStringField(structured, ['priority']);
+  const updated = extractNestedStringField(structured, ['updated']);
+  const url = extractNestedStringField(structured, ['url', 'browseUrl']);
+
+  const parts = [`${issueKey} is ${status}.`];
+  if (summary) parts.push(`Summary: ${summary}.`);
+  if (assignee) parts.push(`Assignee: ${assignee}.`);
+  if (priority) parts.push(`Priority: ${priority}.`);
+  if (updated) parts.push(`Updated: ${updated}.`);
+  if (url) parts.push(`URL: ${url}`);
+
+  return parts.join(' ');
+}
+
+async function tryHandleDirectJiraIssueLookup(
+  context: AgentTurnContext,
+  sessionId: string,
+  state: OpenAISessionState,
+  mcp: {
+    clients: Map<string, Client>;
+  } | null,
+): Promise<AgentTurnResult | null> {
+  if (!isDirectJiraIssueLookupRequest(context.prompt)) return null;
+
+  const issueKey = extractJiraIssueKey(context.prompt);
+  if (!issueKey) return null;
+
+  const client = mcp?.clients.get('atlassian');
+  if (!client) return null;
+
+  context.log(`Using direct Jira issue lookup for ${issueKey}`);
+
+  try {
+    const result = await client.callTool(
+      {
+        name: 'jira_get_issue',
+        arguments: {
+          issue_key: issueKey,
+          output_fields: 'key,summary,status,assignee,priority,updated,url',
+        },
+      },
+      CallToolResultSchema,
+    );
+    const toolOutput = formatMcpToolResult(normalizeMcpCallResult(result));
+    const toolError = extractToolErrorMessage(toolOutput);
+    if (toolError) {
+      context.log(`Direct Jira issue lookup failed: ${toolError}`);
+      return null;
+    }
+
+    const text =
+      summarizeDirectJiraIssueOutput(toolOutput, issueKey) ||
+      `Fetched Jira issue ${issueKey}.`;
+
+    state.history.push({ role: 'user', content: context.prompt });
+    state.history.push({ role: 'assistant', content: text });
+    saveSessionState(sessionId, state);
+
+    context.emitOutput({
+      status: 'success',
+      result: text,
+      newSessionId: sessionId,
+    });
+
+    return {
+      newSessionId: sessionId,
+      closedDuringQuery: false,
+    };
+  } catch (err) {
+    context.log(
+      `Direct Jira issue lookup failed before model fallback: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
 }
 
 async function listToolsWithCompatibility(
@@ -680,10 +892,12 @@ async function connectMcpServers(context: AgentTurnContext): Promise<{
   transports: Array<StdioClientTransport | StreamableHTTPClientTransport>;
   toolDefinitions: OpenAIToolDefinition[];
   bindings: Map<string, McpToolBinding>;
+  connectionErrors: Map<string, string>;
 } | null> {
   const bindings = new Map<string, McpToolBinding>();
   const toolDefinitions: OpenAIToolDefinition[] = [];
   const clients = new Map<string, Client>();
+  const connectionErrors = new Map<string, string>();
   const transports: Array<
     StdioClientTransport | StreamableHTTPClientTransport
   > = [];
@@ -767,10 +981,10 @@ async function connectMcpServers(context: AgentTurnContext): Promise<{
         `Connected MCP server ${server.serverName} with ${tools.length} tool(s)`,
       );
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      connectionErrors.set(server.serverName, errorMessage);
       context.log(
-        `Failed to connect MCP server ${server.serverName}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `Failed to connect MCP server ${server.serverName}: ${errorMessage}`,
       );
       try {
         await transport.close();
@@ -780,7 +994,7 @@ async function connectMcpServers(context: AgentTurnContext): Promise<{
     }
   }
 
-  return { clients, transports, toolDefinitions, bindings };
+  return { clients, transports, toolDefinitions, bindings, connectionErrors };
 }
 
 function formatMcpToolResult(result: {
@@ -867,6 +1081,14 @@ function buildEmptyFinalFallback(toolErrors: string[]): string {
     new Set(toolErrors.map((message) => message.trim()).filter(Boolean)),
   );
   return `I couldn't complete that because ${uniqueErrors[0] || 'a required tool failed'}.`;
+}
+
+function buildTransientOpenAiFailureMessage(error: Error): string | null {
+  if (!/OpenAI request failed \((500|502|503|504)\):/i.test(error.message)) {
+    return null;
+  }
+
+  return "The OpenAI backend hit a transient server error while processing that request. Please retry in a moment.";
 }
 
 function normalizeMcpCallResult(result: { [key: string]: unknown }): {
@@ -988,6 +1210,12 @@ async function runShellTool(
 
   const cwd = args.working_directory || '/workspace/group';
   const timeout = args.timeout_ms || DEFAULT_SHELL_TIMEOUT_MS;
+  const effectiveCommand = [
+    // Some base images only ship `python3`; provide a turn-local shim so
+    // model-authored `python - <<'PY'` fallbacks still run.
+    "if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then python(){ python3 \"$@\"; }; fi",
+    command,
+  ].join('\n');
   context.log(
     `OpenAI shell tool: cwd=${cwd} timeout=${timeout} command=${command.slice(
       0,
@@ -1003,7 +1231,7 @@ async function runShellTool(
     );
     const { stdout, stderr } = await execFileAsync(
       '/bin/bash',
-      ['-lc', command],
+      ['-lc', effectiveCommand],
       {
         cwd,
         timeout,
@@ -1266,6 +1494,9 @@ async function runOpenAITurn(
     context.containerInput.chatJid.startsWith('rcb:');
   const explicitRcTarget = rcChat && extractExplicitRcTarget(context.prompt);
   const crossChatRcSend = isRcCrossChatSendRequest(context.prompt, rcChat);
+  const allowCurrentChatSendTool = shouldExposeCurrentChatSendTool(
+    context.prompt,
+  );
 
   context.log(
     `Running OpenAI turn (session: ${sessionId}, model: ${model}, history: ${state.history.length})`,
@@ -1277,188 +1508,249 @@ async function runOpenAITurn(
   };
   const mcp = await connectMcpServers(context);
   try {
-    const tools = [
-      ...getBuiltinToolDefinitions(),
-      ...(mcp?.toolDefinitions || []),
-    ].filter((tool) => !(crossChatRcSend && tool.name === 'send_message'));
-    const conversationInput: unknown[] = [
-      {
-        type: 'message',
-        role: 'user',
-        content: compiledPrompt,
-      },
-    ];
-    let requestBody: Record<string, unknown> = {
-      model,
-      input: conversationInput,
-      tools,
-      ...(explicitRcTarget || crossChatRcSend
-        ? { tool_choice: 'required' }
-        : {}),
-    };
-    let payload: unknown;
-    const sentMessages: string[] = [];
-    const sentMessageKeys = new Set<string>();
-    const toolErrors: string[] = [];
-
-    for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-      const response = await postOpenAIResponseWithRetry(
-        baseUrl,
-        headers,
-        requestBody,
+    try {
+      const directJiraLookup = await tryHandleDirectJiraIssueLookup(
         context,
+        sessionId,
+        state,
+        mcp,
       );
-
-      payload = (await response.json()) as unknown;
-      context.log(
-        `OpenAI response loop=${loop + 1} output=${summarizeResponseOutput(payload)}`,
-      );
-      const functionCalls = extractFunctionCalls(payload);
-      if (functionCalls.length === 0) break;
-
-      context.log(`OpenAI requested ${functionCalls.length} tool call(s)`);
-      const toolOutputs: Array<{
-        type: 'function_call_output';
-        call_id: string;
-        output: string;
-      }> = [];
-      for (const call of functionCalls) {
-        let output: string;
-        switch (call.name) {
-          case 'shell':
-            output = await runShellTool(call.arguments, context);
-            break;
-          case 'web_fetch':
-            output = await runWebFetchTool(call.arguments, context);
-            break;
-          case 'web_search':
-            output = await runWebSearchTool(call.arguments, context);
-            break;
-          default: {
-            const binding = mcp?.bindings.get(call.name);
-            let parsedArgs: Record<string, unknown> | null = null;
-            if (binding) {
-              try {
-                parsedArgs = JSON.parse(call.arguments) as Record<
-                  string,
-                  unknown
-                >;
-                parsedArgs = normalizeSendToolArgsForPrompt(
-                  binding.mcpName,
-                  parsedArgs,
-                  context.prompt,
-                );
-              } catch {
-                // Ignore malformed tool args; downstream handling will surface the error.
-              }
-            }
-
-            const dedupeKey =
-              binding && parsedArgs
-                ? buildTurnMessageDeduplicationKey(binding.mcpName, parsedArgs)
-                : null;
-            if (dedupeKey && sentMessageKeys.has(dedupeKey)) {
-              context.log(
-                `Skipping duplicate ${binding?.mcpName} call in the same turn`,
-              );
-              output = JSON.stringify({
-                ok: true,
-                is_error: false,
-                output: `Duplicate ${binding?.mcpName} suppressed for this turn.`,
-              });
-              break;
-            }
-
-            const effectiveArgs =
-              binding && parsedArgs
-                ? JSON.stringify(parsedArgs)
-                : call.arguments;
-
-            output =
-              binding && mcp
-                ? await runMcpTool(effectiveArgs, binding, mcp.clients)
-                : JSON.stringify({
-                    ok: false,
-                    error: `Unsupported tool: ${call.name}`,
-                  });
-
-            if (
-              binding &&
-              parsedArgs &&
-              (binding.mcpName === 'send_message' ||
-                binding.mcpName === 'send_rc_message' ||
-                binding.mcpName === 'send_rc_dm')
-            ) {
-              try {
-                const parsedOutput = JSON.parse(output) as { ok?: unknown };
-                if (parsedOutput.ok === true && dedupeKey) {
-                  sentMessageKeys.add(dedupeKey);
-                }
-                if (
-                  binding.mcpName === 'send_message' &&
-                  parsedOutput.ok === true &&
-                  typeof parsedArgs.text === 'string' &&
-                  parsedArgs.text.trim()
-                ) {
-                  sentMessages.push(parsedArgs.text.trim());
-                }
-              } catch {
-                // Ignore malformed tool output; suppression is best-effort.
-              }
-            }
-          }
-        }
-
-        const toolError = extractToolErrorMessage(output);
-        if (toolError) {
-          toolErrors.push(toolError);
-        }
-
-        toolOutputs.push({
-          type: 'function_call_output',
-          call_id: call.call_id,
-          output,
-        });
+      if (directJiraLookup) {
+        return directJiraLookup;
       }
 
-      conversationInput.push(...functionCalls, ...toolOutputs);
-
-      requestBody = {
+      const tools = [
+        ...getBuiltinToolDefinitions(),
+        ...(mcp?.toolDefinitions || []),
+      ].filter(
+        (tool) =>
+          !(crossChatRcSend && tool.name === 'send_message') &&
+          (allowCurrentChatSendTool || tool.name !== 'send_message'),
+      );
+      const conversationInput: unknown[] = [
+        {
+          type: 'message',
+          role: 'user',
+          content: compiledPrompt,
+        },
+      ];
+      let requestBody: Record<string, unknown> = {
         model,
         input: conversationInput,
         tools,
-        ...(explicitRcTarget ? { tool_choice: 'required' } : {}),
+        ...(explicitRcTarget || crossChatRcSend
+          ? { tool_choice: 'required' }
+          : {}),
+      };
+      let payload: unknown;
+      const sentMessages: string[] = [];
+      const sentMessageKeys = new Set<string>();
+      const toolErrors: string[] = [];
+
+      for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+        const response = await postOpenAIResponseWithRetry(
+          baseUrl,
+          headers,
+          requestBody,
+          context,
+        );
+
+        payload = (await response.json()) as unknown;
+        context.log(
+          `OpenAI response loop=${loop + 1} output=${summarizeResponseOutput(payload)}`,
+        );
+        const functionCalls = extractFunctionCalls(payload);
+        if (functionCalls.length === 0) break;
+
+        context.log(`OpenAI requested ${functionCalls.length} tool call(s)`);
+        const toolOutputs: Array<{
+          type: 'function_call_output';
+          call_id: string;
+          output: string;
+        }> = [];
+        for (const call of functionCalls) {
+          let output: string;
+          switch (call.name) {
+            case 'shell':
+              output = await runShellTool(call.arguments, context);
+              break;
+            case 'web_fetch':
+              output = await runWebFetchTool(call.arguments, context);
+              break;
+            case 'web_search':
+              output = await runWebSearchTool(call.arguments, context);
+              break;
+            default: {
+              const binding = mcp?.bindings.get(call.name);
+              let parsedArgs: Record<string, unknown> | null = null;
+              if (binding) {
+                try {
+                  parsedArgs = JSON.parse(call.arguments) as Record<
+                    string,
+                    unknown
+                  >;
+                  parsedArgs = normalizeSendToolArgsForPrompt(
+                    binding.mcpName,
+                    parsedArgs,
+                    context.prompt,
+                  );
+                } catch {
+                  // Ignore malformed tool args; downstream handling will surface the error.
+                }
+              }
+
+              const dedupeKey =
+                binding && parsedArgs
+                  ? buildTurnMessageDeduplicationKey(binding.mcpName, parsedArgs)
+                  : null;
+              if (dedupeKey && sentMessageKeys.has(dedupeKey)) {
+                context.log(
+                  `Skipping duplicate ${binding?.mcpName} call in the same turn`,
+                );
+                output = JSON.stringify({
+                  ok: true,
+                  is_error: false,
+                  output: `Duplicate ${binding?.mcpName} suppressed for this turn.`,
+                });
+                break;
+              }
+
+              const effectiveArgs =
+                binding && parsedArgs
+                  ? JSON.stringify(parsedArgs)
+                  : call.arguments;
+
+              output =
+                binding && mcp
+                  ? await runMcpTool(effectiveArgs, binding, mcp.clients)
+                  : JSON.stringify({
+                      ok: false,
+                      error: `Unsupported tool: ${call.name}`,
+                    });
+
+              if (
+                binding &&
+                parsedArgs &&
+                (binding.mcpName === 'send_message' ||
+                  binding.mcpName === 'send_rc_message' ||
+                  binding.mcpName === 'send_rc_dm')
+              ) {
+                try {
+                  const parsedOutput = JSON.parse(output) as { ok?: unknown };
+                  if (parsedOutput.ok === true && dedupeKey) {
+                    sentMessageKeys.add(dedupeKey);
+                  }
+                  if (
+                    binding.mcpName === 'send_message' &&
+                    parsedOutput.ok === true &&
+                    typeof parsedArgs.text === 'string' &&
+                    parsedArgs.text.trim()
+                  ) {
+                    sentMessages.push(parsedArgs.text.trim());
+                  }
+                } catch {
+                  // Ignore malformed tool output; suppression is best-effort.
+                }
+              }
+            }
+          }
+
+          const toolError = extractToolErrorMessage(output);
+          if (toolError) {
+            const binding = mcp?.bindings.get(call.name);
+            if (binding) {
+              context.log(
+                `MCP tool error server=${binding.serverName} tool=${binding.mcpName} error=${toolError}`,
+              );
+            } else {
+              context.log(`Tool error name=${call.name} error=${toolError}`);
+            }
+            toolErrors.push(toolError);
+          }
+
+          toolOutputs.push({
+            type: 'function_call_output',
+            call_id: call.call_id,
+            output,
+          });
+        }
+
+        conversationInput.push(...functionCalls, ...toolOutputs);
+
+        requestBody = {
+          model,
+          input: conversationInput,
+          tools,
+          ...(explicitRcTarget ? { tool_choice: 'required' } : {}),
+        };
+      }
+
+      if (!payload) {
+        throw new Error('OpenAI response payload missing');
+      }
+
+      const text = extractTextFromResponse(payload);
+      const finalOutput = chooseFinalAssistantOutput(text, sentMessages);
+      const connectorFallback = buildMcpConnectionFailureMessage(
+        Array.from(mcp?.connectionErrors.entries() || []).map(
+          ([serverName, error]) => ({
+            serverName,
+            error,
+          }),
+        ),
+      );
+      const shouldReplaceConnectorRefusal =
+        !!connectorFallback &&
+        containsThirdPartyMcpRefusal(finalOutput.outputText);
+      const outputText =
+        (shouldReplaceConnectorRefusal ? connectorFallback : null) ||
+        finalOutput.outputText ||
+        (toolErrors.length > 0 ? buildEmptyFinalFallback(toolErrors) : '') ||
+        connectorFallback ||
+        '';
+      const historyText = outputText || finalOutput.historyText;
+
+      state.history.push({ role: 'user', content: context.prompt });
+      state.history.push({
+        role: 'assistant',
+        content: historyText,
+      });
+      saveSessionState(sessionId, state);
+
+      context.emitOutput({
+        status: 'success',
+        result: outputText || null,
+        newSessionId: sessionId,
+      });
+
+      return {
+        newSessionId: sessionId,
+        closedDuringQuery: false,
+      };
+    } catch (err) {
+      const error =
+        err instanceof Error ? err : new Error(String(err ?? 'Unknown error'));
+      const transientMessage = buildTransientOpenAiFailureMessage(error);
+      if (!transientMessage) throw error;
+
+      context.log(`Treating transient OpenAI failure as user-visible fallback`);
+      state.history.push({ role: 'user', content: context.prompt });
+      state.history.push({
+        role: 'assistant',
+        content: transientMessage,
+      });
+      saveSessionState(sessionId, state);
+      context.emitOutput({
+        status: 'success',
+        result: transientMessage,
+        newSessionId: sessionId,
+      });
+
+      return {
+        newSessionId: sessionId,
+        closedDuringQuery: false,
       };
     }
-
-    if (!payload) {
-      throw new Error('OpenAI response payload missing');
-    }
-
-    const text = extractTextFromResponse(payload);
-    const finalOutput = chooseFinalAssistantOutput(text, sentMessages);
-    const outputText =
-      finalOutput.outputText ||
-      (toolErrors.length > 0 ? buildEmptyFinalFallback(toolErrors) : '');
-    const historyText = outputText || finalOutput.historyText;
-
-    state.history.push({ role: 'user', content: context.prompt });
-    state.history.push({
-      role: 'assistant',
-      content: historyText,
-    });
-    saveSessionState(sessionId, state);
-
-    context.emitOutput({
-      status: 'success',
-      result: outputText || null,
-      newSessionId: sessionId,
-    });
-
-    return {
-      newSessionId: sessionId,
-      closedDuringQuery: false,
-    };
   } finally {
     if (mcp) {
       for (const transport of mcp.transports) {

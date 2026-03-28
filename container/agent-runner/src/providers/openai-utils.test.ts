@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildMcpConnectionFailureMessage,
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
   containsLegacyToolRefusal,
+  containsThirdPartyMcpRefusal,
+  extractJiraIssueKey,
   hasExplicitOnBehalfRequest,
+  isDirectJiraIssueLookupRequest,
   isSendConfirmation,
   messagesSubstantiallyOverlap,
   normalizeSendToolArgsForPrompt,
@@ -27,6 +31,38 @@ describe('openai-utils', () => {
         'This backend does not support NanoClaw tool execution yet.',
       ),
     ).toBe(true);
+  });
+
+  it('detects third-party MCP refusals in final text', () => {
+    expect(
+      containsThirdPartyMcpRefusal(
+        'I do not have any Gmail MCP tools available in this session.',
+      ),
+    ).toBe(true);
+  });
+
+  it('formats a single external MCP connection failure for user output', () => {
+    expect(
+      buildMcpConnectionFailureMessage([
+        {
+          serverName: 'gmail',
+          error: 'startup timed out after 180000ms',
+        },
+      ]),
+    ).toBe(
+      "I couldn't complete that because the required connector failed to initialize: Gmail (startup timed out after 180000ms).",
+    );
+  });
+
+  it('ignores nanoclaw MCP connection failures in external connector fallback', () => {
+    expect(
+      buildMcpConnectionFailureMessage([
+        {
+          serverName: 'nanoclaw',
+          error: 'startup timed out after 15000ms',
+        },
+      ]),
+    ).toBeNull();
   });
 
   it('suppresses final output when it overlaps a send_message delivery', () => {
@@ -104,6 +140,22 @@ describe('openai-utils', () => {
     expect(hasExplicitOnBehalfRequest('Send this to the Video team.')).toBe(
       false,
     );
+  });
+
+  it('extracts Jira issue keys from prompts', () => {
+    expect(
+      extractJiraIssueKey("What's the status of Jira ticket: MTR-141415"),
+    ).toBe('MTR-141415');
+    expect(extractJiraIssueKey('No issue key here')).toBeNull();
+  });
+
+  it('detects direct Jira issue lookup prompts', () => {
+    expect(
+      isDirectJiraIssueLookupRequest(
+        "What's the status of Jira ticket: MTR-141415",
+      ),
+    ).toBe(true);
+    expect(isDirectJiraIssueLookupRequest('Summarize MTR-141415')).toBe(false);
   });
 
   it('adds on_behalf_intent to RC send tools for explicit on-behalf requests', () => {
