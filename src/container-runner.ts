@@ -182,7 +182,9 @@ export async function runContainerAgent(
           line.includes('[agent-runner] MCP tool error')
         ) {
           logger.warn(context, line);
-        } else if (line.includes('[agent-runner] Failed to connect MCP server')) {
+        } else if (
+          line.includes('[agent-runner] Failed to connect MCP server')
+        ) {
           logger.warn(context, line);
         } else {
           logger.debug(context, line);

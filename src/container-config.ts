@@ -27,6 +27,8 @@ export interface VolumeMount {
   readonly: boolean;
 }
 
+const CONTAINER_CA_BUNDLE_PATH = '/workspace/tls/web-fetch-ca-bundle.pem';
+
 const SESSION_SETTINGS = {
   env: {
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
@@ -105,6 +107,32 @@ function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
   }
 }
 
+function resolveCaBundleMount(): {
+  hostPath: string;
+  containerPath: string;
+} | null {
+  const env = readEnvFile([
+    'WEB_FETCH_CA_BUNDLE',
+    'NODE_EXTRA_CA_CERTS',
+    'SSL_CERT_FILE',
+  ]);
+  const configuredPath =
+    env.WEB_FETCH_CA_BUNDLE?.trim() ||
+    env.NODE_EXTRA_CA_CERTS?.trim() ||
+    env.SSL_CERT_FILE?.trim();
+  if (!configuredPath) return null;
+
+  const hostPath = path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(process.cwd(), configuredPath);
+  if (!fs.existsSync(hostPath)) return null;
+
+  return {
+    hostPath,
+    containerPath: CONTAINER_CA_BUNDLE_PATH,
+  };
+}
+
 export function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -168,6 +196,15 @@ export function buildVolumeMounts(
   const personalMode = isMain || isPersonalFolder(group.folder, GROUPS_DIR);
   addPersonalMounts(mounts, personalMode);
 
+  const caBundleMount = resolveCaBundleMount();
+  if (caBundleMount) {
+    mounts.push({
+      hostPath: caBundleMount.hostPath,
+      containerPath: caBundleMount.containerPath,
+      readonly: true,
+    });
+  }
+
   if (group.containerConfig?.additionalMounts) {
     mounts.push(
       ...validateAdditionalMounts(
@@ -191,7 +228,13 @@ export function buildContainerArgs(
   const containerEnv = readEnvFile([
     'WEB_FETCH_INSECURE_TLS',
     'WEB_FETCH_CA_BUNDLE',
+    'NODE_EXTRA_CA_CERTS',
+    'SSL_CERT_FILE',
   ]);
+  const caBundleMount = resolveCaBundleMount();
+  const insecureTls =
+    containerEnv.WEB_FETCH_INSECURE_TLS?.toLowerCase() === 'true';
+  const caBundle = caBundleMount?.containerPath || null;
 
   args.push('-e', `TZ=${TIMEZONE}`);
   args.push('-e', `NANOCLAW_AGENT_BACKEND=${backendConfig.backend}`);
@@ -204,7 +247,22 @@ export function buildContainerArgs(
   );
   args.push('-e', `${backendConfig.containerCredentialEnvVar}=placeholder`);
   for (const [key, value] of Object.entries(containerEnv)) {
+    if (
+      key === 'WEB_FETCH_CA_BUNDLE' ||
+      key === 'NODE_EXTRA_CA_CERTS' ||
+      key === 'SSL_CERT_FILE'
+    ) {
+      continue;
+    }
     if (value) args.push('-e', `${key}=${value}`);
+  }
+  if (insecureTls) {
+    args.push('-e', 'NODE_TLS_REJECT_UNAUTHORIZED=0');
+  }
+  if (caBundle) {
+    args.push('-e', `WEB_FETCH_CA_BUNDLE=${caBundle}`);
+    args.push('-e', `NODE_EXTRA_CA_CERTS=${caBundle}`);
+    args.push('-e', `SSL_CERT_FILE=${caBundle}`);
   }
 
   args.push(...hostGatewayArgs());
