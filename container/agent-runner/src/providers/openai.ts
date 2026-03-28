@@ -168,7 +168,25 @@ function loadAdditionalDirectoriesSummary(): string {
     .join('\n')}`;
 }
 
-function shouldSkipHistoryForRcLookup(
+function extractExplicitRcNamedTarget(prompt: string): string | null {
+  const quotedMatch = prompt.match(
+    /\b(?:in|from|with|for)\s+["“]([^"”]+)["”]\s*(?:team|chat|group)?(?=$|[\s?.!,])/i,
+  );
+  if (quotedMatch?.[1]?.trim()) {
+    return quotedMatch[1].trim();
+  }
+
+  const bracketedMatch = prompt.match(
+    /\b(?:in|from|with|for)\s+(\[[^\]\n]+\](?:\s+[A-Za-z0-9&/_-]+){0,8})\s*(?:team|chat|group)?(?=$|[\s?.!,])/i,
+  );
+  if (bracketedMatch?.[1]?.trim()) {
+    return bracketedMatch[1].trim();
+  }
+
+  return null;
+}
+
+export function shouldSkipHistoryForRcLookup(
   prompt: string,
   rcChat: boolean,
 ): boolean {
@@ -176,6 +194,7 @@ function shouldSkipHistoryForRcLookup(
 
   return (
     /!\[:(?:Team|Person)\]\(\d+\)/.test(prompt) ||
+    !!extractExplicitRcNamedTarget(prompt) ||
     /\b(?:summarize|show|read|get|latest)\b[\s\S]{0,120}\b(?:message|messages)\b[\s\S]{0,120}\b(?:from|with)\b/i.test(
       prompt,
     ) ||
@@ -206,7 +225,7 @@ function shouldExposeCurrentChatSendTool(prompt: string): boolean {
   );
 }
 
-function extractExplicitRcTarget(prompt: string): string | null {
+export function extractExplicitRcTarget(prompt: string): string | null {
   const mentionMatch = prompt.match(/!\[:(?:Team|Person)\]\((\d+)\)/i);
   if (mentionMatch) return mentionMatch[1];
 
@@ -217,6 +236,9 @@ function extractExplicitRcTarget(prompt: string): string | null {
     /\b(?:from|with|chat|team|id)\s+([0-9]{6,})\b/i,
   );
   if (bareIdMatch) return bareIdMatch[1];
+
+  const namedTarget = extractExplicitRcNamedTarget(prompt);
+  if (namedTarget) return namedTarget;
 
   return null;
 }
@@ -316,7 +338,7 @@ function buildPrompt(
       'If the user provides a numeric RC chat/team ID, a full JID like rc:123, or a RingCentral mention like ![:Team](123), call read_rc_messages with that ID directly before trying list_rc_chats. Prefer the direct ID read over saying the chat is unavailable.',
     );
     toolInstructions.push(
-      'When the latest RingCentral request includes an explicit target such as ![:Team](123), ![:Person](123), rc:123, rcb:123, or a bare numeric chat ID, that exact target is authoritative for this turn. Do not reuse or substitute a different DM or team from earlier conversation history.',
+      'When the latest RingCentral request includes an explicit target such as ![:Team](123), ![:Person](123), rc:123, rcb:123, a bare numeric chat ID, or an exact quoted/bracketed team name, that exact target is authoritative for this turn. Do not reuse or substitute a different DM or team from earlier conversation history.',
     );
     if (explicitRcTarget) {
       toolInstructions.push(
