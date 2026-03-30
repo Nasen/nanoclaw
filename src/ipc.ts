@@ -3,6 +3,7 @@ import path from 'path';
 
 import { DATA_DIR, IPC_POLL_INTERVAL } from './config.js';
 import { AvailableGroup } from './container-runner.js';
+import { isMainGroup, isMainGroupFolder } from './group-access.js';
 import { processMessageFiles } from './ipc-message-handler.js';
 import { processTaskIpc, TaskIpcData } from './ipc-task-handler.js';
 import { logger } from './logger.js';
@@ -134,11 +135,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
     // Build folder→isMain lookup from registered groups
     const folderIsMain = new Map<string, boolean>();
     for (const group of Object.values(registeredGroups)) {
-      if (group.isMain) folderIsMain.set(group.folder, true);
+      folderIsMain.set(group.folder, isMainGroup(group));
     }
 
     for (const sourceGroup of groupFolders) {
-      const isMain = folderIsMain.get(sourceGroup) === true;
+      const isMain =
+        folderIsMain.get(sourceGroup) === true || isMainGroupFolder(sourceGroup);
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
       const errorDir = path.join(ipcBaseDir, 'errors');

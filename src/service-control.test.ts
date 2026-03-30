@@ -31,6 +31,17 @@ describe('isAdminServiceControlGroup', () => {
     ).toBe(true);
   });
 
+  it('allows configured main folders', () => {
+    expect(
+      isAdminServiceControlGroup({
+        name: 'RC Team',
+        folder: 'rc-grp-nanoclaw-jiraops',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+      }),
+    ).toBe(true);
+  });
+
   it('rejects non-admin groups', () => {
     expect(
       isAdminServiceControlGroup({

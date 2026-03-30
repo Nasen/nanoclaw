@@ -5,8 +5,7 @@ import {
   writeTasksSnapshot,
 } from './container-runner.js';
 import { getAllTasks, getSession, setSession } from './db.js';
-import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
-import { GROUPS_DIR } from './config.js';
+import { isMainGroup, isPersonalModeGroup } from './group-access.js';
 import { logger } from './logger.js';
 import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import {
@@ -51,8 +50,7 @@ export async function runGroupAgent(
   deps: RunGroupAgentDeps,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain =
-    group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
+  const isMain = isMainGroup(group);
 
   const tasks = getAllTasks();
   writeTasksSnapshot(
@@ -91,7 +89,7 @@ export async function runGroupAgent(
         groupFolder: group.folder,
         chatJid,
         isMain,
-        personalMode: isMain || isPersonalFolder(group.folder, GROUPS_DIR),
+        personalMode: isPersonalModeGroup(group),
       },
       (proc, containerName) =>
         deps.queue.registerProcess(chatJid, proc, containerName, group.folder),

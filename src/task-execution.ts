@@ -14,6 +14,7 @@ import {
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
+import { isMainGroup } from './group-access.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -129,7 +130,7 @@ function writeTaskContextSnapshot(
   task: ScheduledTask,
   group: RegisteredGroup,
 ): void {
-  const isMain = group.isMain === true;
+  const isMain = isMainGroup(group);
   const tasks = getAllTasks();
   writeTasksSnapshot(
     task.group_folder,
@@ -219,7 +220,7 @@ export async function runScheduledTask(
         prompt: task.prompt,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
-        isMain: group.isMain === true,
+        isMain: isMainGroup(group),
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
       },

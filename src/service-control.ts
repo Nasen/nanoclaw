@@ -1,5 +1,4 @@
-import { GROUPS_DIR } from './config.js';
-import { isMainFolder } from './rc-auto-register.js';
+import { isMainGroup } from './group-access.js';
 import { RegisteredGroup } from './types.js';
 
 const SERVICE_TOGGLE_PATTERN =
@@ -15,7 +14,7 @@ export function isAdminServiceControlGroup(
   group: RegisteredGroup | undefined,
 ): boolean {
   if (!group) return false;
-  return group.isMain === true || isMainFolder(group.folder, GROUPS_DIR);
+  return isMainGroup(group);
 }
 
 export function buildServiceToggleConfirmation(
