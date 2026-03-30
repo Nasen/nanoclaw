@@ -24,8 +24,9 @@ import {
 } from './git-auth.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { isPersonalFolder } from './rc-auto-register.js';
-import { RegisteredGroup } from './types.js';
+import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
+import { getAllRegisteredGroups } from './db.js';
+import { AdditionalMount, RegisteredGroup } from './types.js';
 
 export interface VolumeMount {
   hostPath: string;
@@ -147,6 +148,47 @@ function resolveCaBundleMount(): {
   };
 }
 
+function getSharedMainFolderAdditionalMounts(): AdditionalMount[] {
+  const groups = getAllRegisteredGroups();
+  const rcPersonalGroup = Object.values(groups).find(
+    (group) => group.folder === 'rc-personal',
+  );
+  return rcPersonalGroup?.containerConfig?.additionalMounts ?? [];
+}
+
+function mergeAdditionalMounts(
+  inheritedMounts: AdditionalMount[],
+  ownMounts: AdditionalMount[],
+): AdditionalMount[] {
+  const merged = new Map<string, AdditionalMount>();
+
+  for (const mount of inheritedMounts) {
+    const key = `${mount.hostPath}::${mount.containerPath || ''}`;
+    merged.set(key, mount);
+  }
+
+  for (const mount of ownMounts) {
+    const key = `${mount.hostPath}::${mount.containerPath || ''}`;
+    merged.set(key, mount);
+  }
+
+  return [...merged.values()];
+}
+
+function resolveEffectiveAdditionalMounts(group: RegisteredGroup): AdditionalMount[] {
+  const ownMounts = group.containerConfig?.additionalMounts ?? [];
+  if (
+    group.folder === 'rc-personal' ||
+    !isMainFolder(group.folder, GROUPS_DIR)
+  ) {
+    return ownMounts;
+  }
+
+  const inheritedMounts = getSharedMainFolderAdditionalMounts();
+  if (inheritedMounts.length === 0) return ownMounts;
+  return mergeAdditionalMounts(inheritedMounts, ownMounts);
+}
+
 export function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -219,10 +261,11 @@ export function buildVolumeMounts(
     });
   }
 
-  if (group.containerConfig?.additionalMounts) {
+  const additionalMounts = resolveEffectiveAdditionalMounts(group);
+  if (additionalMounts.length > 0) {
     mounts.push(
       ...validateAdditionalMounts(
-        group.containerConfig.additionalMounts,
+        additionalMounts,
         group.name,
         personalMode,
       ),

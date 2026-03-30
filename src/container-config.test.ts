@@ -1,7 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const { mockReadEnvFile, mockGetAgentBackendConfig, mockIsPersonalFolder } =
-  vi.hoisted(() => ({
+const {
+  mockReadEnvFile,
+  mockGetAgentBackendConfig,
+  mockIsMainFolder,
+  mockIsPersonalFolder,
+  mockValidateAdditionalMounts,
+  mockGetAllRegisteredGroups,
+} = vi.hoisted(() => ({
     mockReadEnvFile: vi.fn(() => ({})),
     mockGetAgentBackendConfig: vi.fn(() => ({
       backend: 'openai' as const,
@@ -11,7 +17,10 @@ const { mockReadEnvFile, mockGetAgentBackendConfig, mockIsPersonalFolder } =
       containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
       authMode: 'api-key' as const,
     })),
+    mockIsMainFolder: vi.fn(() => false),
     mockIsPersonalFolder: vi.fn(() => false),
+    mockValidateAdditionalMounts: vi.fn(() => []),
+    mockGetAllRegisteredGroups: vi.fn(() => ({})),
   }));
 
 vi.mock('./agent-backend.js', () => ({
@@ -49,11 +58,16 @@ vi.mock('./group-folder.js', () => ({
 }));
 
 vi.mock('./mount-security.js', () => ({
-  validateAdditionalMounts: vi.fn(() => []),
+  validateAdditionalMounts: mockValidateAdditionalMounts,
 }));
 
 vi.mock('./rc-auto-register.js', () => ({
+  isMainFolder: mockIsMainFolder,
   isPersonalFolder: mockIsPersonalFolder,
+}));
+
+vi.mock('./db.js', () => ({
+  getAllRegisteredGroups: mockGetAllRegisteredGroups,
 }));
 
 vi.mock('fs', async () => {
@@ -85,7 +99,13 @@ describe('buildContainerArgs', () => {
   beforeEach(() => {
     mockReadEnvFile.mockReset();
     mockGetAgentBackendConfig.mockClear();
+    mockIsMainFolder.mockReset();
     mockIsPersonalFolder.mockReset();
+    mockValidateAdditionalMounts.mockReset();
+    mockGetAllRegisteredGroups.mockReset();
+    mockValidateAdditionalMounts.mockReturnValue([]);
+    mockGetAllRegisteredGroups.mockReturnValue({});
+    mockIsMainFolder.mockReturnValue(false);
     mockIsPersonalFolder.mockReturnValue(false);
     vi.mocked(fs.existsSync).mockImplementation(
       (candidate) =>
@@ -203,6 +223,147 @@ describe('buildContainerArgs', () => {
       containerPath: CONTAINER_GIT_AUTH_DIR,
       readonly: false,
     });
+  });
+
+  it('inherits rc-personal additional mounts for main folders', () => {
+    mockIsMainFolder.mockImplementation(
+      ((folder: string) => folder === 'rc-grp-nanoclaw-gitops') as any,
+    );
+    mockGetAllRegisteredGroups.mockReturnValue({
+      'rcb:157530931206': {
+        name: 'NanoClaw-Personal',
+        folder: 'rc-personal',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: '/Users/nasen.you/Projects',
+              containerPath: 'projects',
+              readonly: false,
+            },
+          ],
+        },
+      },
+    });
+
+    buildVolumeMounts(
+      {
+        name: 'NanoClaw-GitOps',
+        folder: 'rc-grp-nanoclaw-gitops',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+      },
+      true,
+    );
+
+    expect(mockValidateAdditionalMounts).toHaveBeenCalledWith(
+      [
+        {
+          hostPath: '/Users/nasen.you/Projects',
+          containerPath: 'projects',
+          readonly: false,
+        },
+      ],
+      'NanoClaw-GitOps',
+      true,
+    );
+  });
+
+  it('lets group-specific additional mounts override inherited rc-personal mounts', () => {
+    mockIsMainFolder.mockImplementation(
+      ((folder: string) => folder === 'rc-grp-nanoclaw-gitops') as any,
+    );
+    mockGetAllRegisteredGroups.mockReturnValue({
+      'rcb:157530931206': {
+        name: 'NanoClaw-Personal',
+        folder: 'rc-personal',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: '/Users/nasen.you/Projects',
+              containerPath: 'projects',
+              readonly: false,
+            },
+            {
+              hostPath: '/Users/nasen.you/Shared',
+              containerPath: 'shared',
+              readonly: true,
+            },
+          ],
+        },
+      },
+    });
+
+    buildVolumeMounts(
+      {
+        name: 'NanoClaw-GitOps',
+        folder: 'rc-grp-nanoclaw-gitops',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: '/Users/nasen.you/Projects',
+              containerPath: 'projects',
+              readonly: true,
+            },
+          ],
+        },
+      },
+      true,
+    );
+
+    expect(mockValidateAdditionalMounts).toHaveBeenCalledWith(
+      [
+        {
+          hostPath: '/Users/nasen.you/Projects',
+          containerPath: 'projects',
+          readonly: true,
+        },
+        {
+          hostPath: '/Users/nasen.you/Shared',
+          containerPath: 'shared',
+          readonly: true,
+        },
+      ],
+      'NanoClaw-GitOps',
+      true,
+    );
+  });
+
+  it('does not inherit rc-personal additional mounts for non-main groups', () => {
+    mockGetAllRegisteredGroups.mockReturnValue({
+      'rcb:157530931206': {
+        name: 'NanoClaw-Personal',
+        folder: 'rc-personal',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: '/Users/nasen.you/Projects',
+              containerPath: 'projects',
+              readonly: false,
+            },
+          ],
+        },
+      },
+    });
+
+    buildVolumeMounts(
+      {
+        name: 'External Group',
+        folder: 'external-group',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      },
+      false,
+    );
+
+    expect(mockValidateAdditionalMounts).not.toHaveBeenCalled();
   });
 
   it('injects git auth env when the git auth mount is present', () => {
