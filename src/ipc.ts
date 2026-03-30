@@ -140,7 +140,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     for (const sourceGroup of groupFolders) {
       const isMain =
-        folderIsMain.get(sourceGroup) === true || isMainGroupFolder(sourceGroup);
+        folderIsMain.get(sourceGroup) === true ||
+        isMainGroupFolder(sourceGroup);
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
       const errorDir = path.join(ipcBaseDir, 'errors');
