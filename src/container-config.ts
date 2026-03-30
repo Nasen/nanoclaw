@@ -175,7 +175,9 @@ function mergeAdditionalMounts(
   return [...merged.values()];
 }
 
-function resolveEffectiveAdditionalMounts(group: RegisteredGroup): AdditionalMount[] {
+function resolveEffectiveAdditionalMounts(
+  group: RegisteredGroup,
+): AdditionalMount[] {
   const ownMounts = group.containerConfig?.additionalMounts ?? [];
   if (
     group.folder === 'rc-personal' ||
@@ -264,11 +266,7 @@ export function buildVolumeMounts(
   const additionalMounts = resolveEffectiveAdditionalMounts(group);
   if (additionalMounts.length > 0) {
     mounts.push(
-      ...validateAdditionalMounts(
-        additionalMounts,
-        group.name,
-        personalMode,
-      ),
+      ...validateAdditionalMounts(additionalMounts, group.name, personalMode),
     );
   }
 

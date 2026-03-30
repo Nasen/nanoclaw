@@ -8,20 +8,20 @@ const {
   mockValidateAdditionalMounts,
   mockGetAllRegisteredGroups,
 } = vi.hoisted(() => ({
-    mockReadEnvFile: vi.fn(() => ({})),
-    mockGetAgentBackendConfig: vi.fn(() => ({
-      backend: 'openai' as const,
-      model: 'gpt-5-mini',
-      upstreamBaseUrl: 'https://api.openai.com/v1',
-      containerBaseUrlEnvVar: 'OPENAI_BASE_URL' as const,
-      containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
-      authMode: 'api-key' as const,
-    })),
-    mockIsMainFolder: vi.fn(() => false),
-    mockIsPersonalFolder: vi.fn(() => false),
-    mockValidateAdditionalMounts: vi.fn(() => []),
-    mockGetAllRegisteredGroups: vi.fn(() => ({})),
-  }));
+  mockReadEnvFile: vi.fn(() => ({})),
+  mockGetAgentBackendConfig: vi.fn(() => ({
+    backend: 'openai' as const,
+    model: 'gpt-5-mini',
+    upstreamBaseUrl: 'https://api.openai.com/v1',
+    containerBaseUrlEnvVar: 'OPENAI_BASE_URL' as const,
+    containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
+    authMode: 'api-key' as const,
+  })),
+  mockIsMainFolder: vi.fn(() => false),
+  mockIsPersonalFolder: vi.fn(() => false),
+  mockValidateAdditionalMounts: vi.fn(() => []),
+  mockGetAllRegisteredGroups: vi.fn(() => ({})),
+}));
 
 vi.mock('./agent-backend.js', () => ({
   getAgentBackendConfig: mockGetAgentBackendConfig,
