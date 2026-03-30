@@ -11,8 +11,9 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { STORE_DIR } from '../src/config.js';
+import { CONTAINER_IMAGE, STORE_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
+import { getGitAuthPaths, hasGitAuthDir } from '../src/git-auth.js';
 import { logger } from '../src/logger.js';
 import {
   getPlatform,
@@ -21,6 +22,36 @@ import {
   isRoot,
 } from './platform.js';
 import { emitStatus } from './status.js';
+
+export function detectContainerGitTools(
+  projectRoot: string,
+  containerRuntime: string,
+): 'ready' | 'configured_but_not_verified' | 'missing' | 'unknown' {
+  if (containerRuntime === 'none') return 'unknown';
+
+  const runtimeBin =
+    containerRuntime === 'apple-container' ? 'container' : 'docker';
+  try {
+    execSync(
+      `${runtimeBin} run --rm --entrypoint /bin/sh ${CONTAINER_IMAGE} -lc "command -v git >/dev/null && command -v ssh >/dev/null"`,
+      { stdio: 'ignore' },
+    );
+    return 'ready';
+  } catch {
+    try {
+      const dockerfile = fs.readFileSync(
+        path.join(projectRoot, 'container', 'Dockerfile'),
+        'utf-8',
+      );
+      if (dockerfile.includes('git') && dockerfile.includes('openssh-client')) {
+        return 'configured_but_not_verified';
+      }
+    } catch {
+      // Fall through to missing.
+    }
+    return 'missing';
+  }
+}
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -170,6 +201,14 @@ export async function run(_args: string[]): Promise<void> {
     mountAllowlist = 'configured';
   }
 
+  const gitAuthConfigured = hasGitAuthDir();
+  const ownerGitAuthMount = gitAuthConfigured ? 'available' : 'missing';
+  const containerGitTools = detectContainerGitTools(
+    projectRoot,
+    containerRuntime,
+  );
+  const gitAuthPath = getGitAuthPaths().hostDir;
+
   // 7. Check NotebookLM host auth when configured
   let notebookLm = 'not_configured';
   const notebookLmConfigured = Boolean(
@@ -205,6 +244,10 @@ export async function run(_args: string[]): Promise<void> {
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
+    GIT_AUTH_DIR: gitAuthConfigured ? 'configured' : 'missing',
+    GIT_AUTH_PATH: gitAuthPath,
+    OWNER_GIT_AUTH_MOUNT: ownerGitAuthMount,
+    CONTAINER_GIT_TOOLS: containerGitTools,
     NOTEBOOKLM: notebookLm,
     STATUS: status,
     LOG: 'logs/setup.log',

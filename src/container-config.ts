@@ -16,6 +16,12 @@ import {
   TIMEZONE,
 } from './config.js';
 import { readEnvFile } from './env.js';
+import {
+  CONTAINER_GIT_AUTH_DIR,
+  getContainerGitAuthEnv,
+  getGitAuthPaths,
+  hasGitAuthDir,
+} from './git-auth.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { isPersonalFolder } from './rc-auto-register.js';
@@ -103,6 +109,14 @@ function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
       hostPath: figmaMcpDir,
       containerPath: '/workspace/figma-mcp',
       readonly: true,
+    });
+  }
+
+  if (personalMode && hasGitAuthDir()) {
+    mounts.push({
+      hostPath: getGitAuthPaths().hostDir,
+      containerPath: CONTAINER_GIT_AUTH_DIR,
+      readonly: false,
     });
   }
 }
@@ -246,6 +260,11 @@ export function buildContainerArgs(
     `${backendConfig.containerBaseUrlEnvVar}=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
   args.push('-e', `${backendConfig.containerCredentialEnvVar}=placeholder`);
+  if (mounts.some((mount) => mount.containerPath === CONTAINER_GIT_AUTH_DIR)) {
+    for (const [key, value] of Object.entries(getContainerGitAuthEnv())) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
   for (const [key, value] of Object.entries(containerEnv)) {
     if (
       key === 'WEB_FETCH_CA_BUNDLE' ||

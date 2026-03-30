@@ -1,6 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { shouldCloseContainerAfterTurn } from './group-agent-runner.js';
+const {
+  mockRunContainerAgent,
+  mockWriteGroupsSnapshot,
+  mockWriteTasksSnapshot,
+} = vi.hoisted(() => ({
+  mockRunContainerAgent: vi.fn(),
+  mockWriteGroupsSnapshot: vi.fn(),
+  mockWriteTasksSnapshot: vi.fn(),
+}));
+
+vi.mock('./container-runner.js', () => ({
+  runContainerAgent: mockRunContainerAgent,
+  writeGroupsSnapshot: mockWriteGroupsSnapshot,
+  writeTasksSnapshot: mockWriteTasksSnapshot,
+}));
+
+import { _initTestDatabase, getSession, setSession } from './db.js';
+import {
+  runGroupAgent,
+  shouldCloseContainerAfterTurn,
+} from './group-agent-runner.js';
 import type { ContainerOutput } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
@@ -14,7 +34,7 @@ function makeGroup(folder: string): RegisteredGroup {
 }
 
 describe('shouldCloseContainerAfterTurn', () => {
-  it('closes rc-personal containers after the trailing success marker', () => {
+  it('does not auto-close rc-personal after the trailing success marker', () => {
     const result: ContainerOutput = {
       status: 'success',
       result: null,
@@ -22,10 +42,10 @@ describe('shouldCloseContainerAfterTurn', () => {
 
     expect(
       shouldCloseContainerAfterTurn(makeGroup('rc-personal'), result),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it('does not close normal groups after the trailing success marker', () => {
+  it('does not auto-close normal groups after the trailing success marker', () => {
     const result: ContainerOutput = {
       status: 'success',
       result: null,
@@ -35,15 +55,49 @@ describe('shouldCloseContainerAfterTurn', () => {
       shouldCloseContainerAfterTurn(makeGroup('rc-grp-builds'), result),
     ).toBe(false);
   });
+});
 
-  it('does not close rc-personal during a streamed result payload', () => {
-    const result: ContainerOutput = {
+describe('runGroupAgent session persistence', () => {
+  beforeEach(() => {
+    _initTestDatabase();
+    vi.clearAllMocks();
+  });
+
+  it('passes the stored session ID into the container and persists the new one', async () => {
+    setSession('group-folder', 'session-old');
+    mockRunContainerAgent.mockResolvedValue({
       status: 'success',
-      result: 'partial output',
+      result: null,
+      newSessionId: 'session-new',
+    });
+
+    const deps = {
+      queue: {
+        registerProcess: vi.fn(),
+      },
+      getAvailableGroups: () => [],
+      getRegisteredJids: () => new Set<string>(),
     };
 
-    expect(
-      shouldCloseContainerAfterTurn(makeGroup('rc-personal'), result),
-    ).toBe(false);
+    const result = await runGroupAgent(
+      makeGroup('group-folder'),
+      'hello',
+      'group@g.us',
+      deps as any,
+    );
+
+    expect(result).toBe('success');
+    expect(mockRunContainerAgent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        prompt: 'hello',
+        groupFolder: 'group-folder',
+        chatJid: 'group@g.us',
+        sessionId: 'session-old',
+      }),
+      expect.any(Function),
+      undefined,
+    );
+    expect(getSession('group-folder')).toBe('session-new');
   });
 });

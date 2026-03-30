@@ -63,6 +63,8 @@ interface McpListedTool {
 }
 
 const OPENAI_STATE_DIR = '/home/node/.nanoclaw/openai';
+const CONTAINER_GIT_CONFIG_PATH =
+  '/home/node/.config/nanoclaw/git-auth/gitconfig';
 const DEFAULT_OPENAI_MODEL = 'gpt-5-mini';
 const DEFAULT_SHELL_TIMEOUT_MS = 120_000;
 const MAX_TOOL_LOOPS = 16;
@@ -153,7 +155,10 @@ function loadGlobalContext(isMain: boolean): string {
   return fs.readFileSync(globalClaudeMdPath, 'utf-8').trim();
 }
 
-function loadAdditionalDirectoriesSummary(): string {
+function loadAdditionalDirectoriesSummary(
+  personalMode: boolean,
+  agentEnv: Record<string, string | undefined>,
+): string {
   const extraBase = '/workspace/extra';
   if (!fs.existsSync(extraBase)) return '';
 
@@ -163,9 +168,31 @@ function loadAdditionalDirectoriesSummary(): string {
     .filter((fullPath) => fs.statSync(fullPath).isDirectory());
 
   if (dirs.length === 0) return '';
-  return `Additional mounted directories are available at:\n${dirs
-    .map((dir) => `- ${dir}`)
-    .join('\n')}`;
+
+  const lines = [
+    'Additional mounted directories are available at:',
+    ...dirs.map((dir) => `- ${dir}`),
+    'Use repositories under /workspace/extra for Git work. /workspace/project is mounted read-only.',
+  ];
+
+  if (
+    personalMode &&
+    agentEnv.GIT_CONFIG_GLOBAL?.trim() === CONTAINER_GIT_CONFIG_PATH
+  ) {
+    lines.push(
+      'Owner-context Git auth is configured in this turn for git CLI over HTTPS or SSH.',
+    );
+  } else if (personalMode) {
+    lines.push(
+      'No dedicated Git auth directory is mounted in this turn, so remote git authentication may fail.',
+    );
+  } else {
+    lines.push(
+      'This turn does not include owner Git auth. Do not assume remote git credentials are available.',
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function extractExplicitRcNamedTarget(prompt: string): string | null {
@@ -261,7 +288,10 @@ function buildPrompt(
     sections.push(globalContext);
   }
 
-  const extraDirsSummary = loadAdditionalDirectoriesSummary();
+  const extraDirsSummary = loadAdditionalDirectoriesSummary(
+    !!context.containerInput.personalMode,
+    context.agentEnv,
+  );
   if (extraDirsSummary) sections.push(extraDirsSummary);
 
   const filteredHistory =
@@ -682,7 +712,7 @@ function selectOpenAiToolsForPrompt(
       ? selectGmailToolsForPrompt(tools, promptTokens)
       : serverName === 'atlassian'
         ? selectAtlassianToolsForPrompt(tools, prompt)
-      : tools;
+        : tools;
   const ranked = candidateTools
     .map((tool, index) => ({
       tool,
@@ -1110,7 +1140,7 @@ function buildTransientOpenAiFailureMessage(error: Error): string | null {
     return null;
   }
 
-  return "The OpenAI backend hit a transient server error while processing that request. Please retry in a moment.";
+  return 'The OpenAI backend hit a transient server error while processing that request. Please retry in a moment.';
 }
 
 function normalizeMcpCallResult(result: { [key: string]: unknown }): {
@@ -1235,7 +1265,7 @@ async function runShellTool(
   const effectiveCommand = [
     // Some base images only ship `python3`; provide a turn-local shim so
     // model-authored `python - <<'PY'` fallbacks still run.
-    "if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then python(){ python3 \"$@\"; }; fi",
+    'if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then python(){ python3 "$@"; }; fi',
     command,
   ].join('\n');
   context.log(
@@ -1623,7 +1653,10 @@ async function runOpenAITurn(
 
               const dedupeKey =
                 binding && parsedArgs
-                  ? buildTurnMessageDeduplicationKey(binding.mcpName, parsedArgs)
+                  ? buildTurnMessageDeduplicationKey(
+                      binding.mcpName,
+                      parsedArgs,
+                    )
                   : null;
               if (dedupeKey && sentMessageKeys.has(dedupeKey)) {
                 context.log(

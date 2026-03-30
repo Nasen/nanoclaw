@@ -4,7 +4,7 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
-import { getAllTasks } from './db.js';
+import { getAllTasks, getSession, setSession } from './db.js';
 import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
@@ -16,6 +16,11 @@ import {
 } from './rc-delivery-policy.js';
 import { resolveOutboundTarget } from './router.js';
 import { getServiceStateVersion, isServiceEnabled } from './service-state.js';
+import {
+  buildChatTurnInput,
+  handleReservedSlashCommand,
+  hasAllowedStandaloneSlashCommand,
+} from './slash-commands.js';
 import { RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
@@ -33,14 +38,10 @@ interface RunGroupAgentDeps {
 }
 
 export function shouldCloseContainerAfterTurn(
-  group: RegisteredGroup,
-  result: ContainerOutput,
+  _group: RegisteredGroup,
+  _result: ContainerOutput,
 ): boolean {
-  return (
-    group.folder === 'rc-personal' &&
-    result.status === 'success' &&
-    result.result === null
-  );
+  return false;
 }
 
 export async function runGroupAgent(
@@ -86,6 +87,7 @@ export async function runGroupAgent(
       group,
       {
         prompt,
+        sessionId: getSession(group.folder),
         groupFolder: group.folder,
         chatJid,
         isMain,
@@ -102,6 +104,10 @@ export async function runGroupAgent(
         'Container agent error',
       );
       return 'error';
+    }
+
+    if (output.newSessionId) {
+      setSession(group.folder, output.newSessionId);
     }
 
     return 'success';
@@ -134,13 +140,12 @@ export async function processGroupMessages(
   const group = deps.getRegisteredGroup(chatJid);
   if (!group) return true;
 
-  const { findChannel, formatMessages } = await import('./router.js');
+  const { findChannel } = await import('./router.js');
   const { getMessagesSince } = await import('./db.js');
   const { groupNeedsTrigger, hasAllowedTrigger, isPersonalRcDm } =
     await import('./message-gating.js');
   const { loadSenderAllowlist } = await import('./sender-allowlist.js');
-  const { ASSISTANT_NAME, IDLE_TIMEOUT, TIMEZONE } =
-    await import('./config.js');
+  const { ASSISTANT_NAME, TIMEZONE } = await import('./config.js');
 
   const channel = findChannel(deps.channels, chatJid);
   if (!channel) {
@@ -157,11 +162,18 @@ export async function processGroupMessages(
 
   if (groupNeedsTrigger(group)) {
     const allowlistCfg = loadSenderAllowlist();
-    if (!hasAllowedTrigger(chatJid, missedMessages, allowlistCfg)) return true;
+    if (
+      !hasAllowedTrigger(chatJid, missedMessages, allowlistCfg) &&
+      !hasAllowedStandaloneSlashCommand(chatJid, missedMessages, allowlistCfg)
+    ) {
+      return true;
+    }
   }
 
+  const turnInput = buildChatTurnInput(missedMessages, TIMEZONE);
+
   const personalRcDm = isPersonalRcDm(chatJid, group);
-  if (personalRcDm && !deps.autoAssistEnabled()) {
+  if (personalRcDm && !deps.autoAssistEnabled() && !turnInput.slashCommand) {
     logger.debug(
       { group: group.name },
       'Auto-assist OFF — skipping agent for personal RC DM',
@@ -189,10 +201,28 @@ export async function processGroupMessages(
           : '[RingCentral routing: Normal replies in RingCentral use bot delivery by policy. Personal delivery is only for explicit on-behalf requests.]\n\n'
       : '';
 
+  if (turnInput.slashCommand) {
+    const handled = await handleReservedSlashCommand({
+      slashCommand: turnInput.slashCommand,
+      chatJid,
+      groupFolder: group.folder,
+      queue: deps.queue,
+      sendMessage: (text) => channel.sendMessage(chatJid, text),
+    });
+    if (handled) {
+      deps.setLastAgentTimestamp(
+        chatJid,
+        missedMessages[missedMessages.length - 1].timestamp,
+      );
+      deps.saveState();
+      return true;
+    }
+  }
+
   const prompt =
-    autoAssistPrefix +
-    rcRoutingPrefix +
-    formatMessages(missedMessages, TIMEZONE);
+    turnInput.mode === 'raw'
+      ? turnInput.text
+      : autoAssistPrefix + rcRoutingPrefix + turnInput.text;
   const previousCursor = deps.getLastAgentTimestamp(chatJid);
   deps.setLastAgentTimestamp(
     chatJid,
@@ -205,18 +235,6 @@ export async function processGroupMessages(
     'Processing messages',
   );
 
-  let idleTimer: ReturnType<typeof setTimeout> | null = null;
-  const resetIdleTimer = () => {
-    if (idleTimer) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      logger.debug(
-        { group: group.name },
-        'Idle timeout, closing container stdin',
-      );
-      deps.queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
-  };
-
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
@@ -227,6 +245,10 @@ export async function processGroupMessages(
     chatJid,
     deps,
     async (result) => {
+      if (result.newSessionId) {
+        setSession(group.folder, result.newSessionId);
+      }
+
       if (
         !isServiceEnabled() ||
         getServiceStateVersion() !== serviceStateVersion
@@ -235,6 +257,16 @@ export async function processGroupMessages(
           { group: group.name },
           'Dropping agent output because service was disabled mid-run',
         );
+        return;
+      }
+
+      if (result.lifecycle === 'query_started') {
+        return;
+      }
+
+      if (result.lifecycle === 'idle_waiting') {
+        deps.queue.notifyIdle(chatJid);
+        await channel.setTyping?.(chatJid, false);
         return;
       }
 
@@ -275,21 +307,15 @@ export async function processGroupMessages(
           await target.channel.sendMessage(target.jid, outboundText);
           outputSentToUser = true;
         }
-        resetIdleTimer();
       }
 
       if (result.status === 'error') {
         hadError = true;
       }
-
-      if (shouldCloseContainerAfterTurn(group, result)) {
-        deps.queue.closeStdin(chatJid);
-      }
     },
   );
 
   await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
     if (getServiceStateVersion() !== serviceStateVersion) {

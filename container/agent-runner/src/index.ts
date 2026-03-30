@@ -160,6 +160,12 @@ async function main(): Promise<void> {
 
   try {
     while (true) {
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+        lifecycle: 'query_started',
+      });
       log(
         `Starting query with ${provider.name} (session: ${
           sessionId || 'new'
@@ -192,7 +198,12 @@ async function main(): Promise<void> {
         break;
       }
 
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: sessionId,
+        lifecycle: 'idle_waiting',
+      });
 
       log('Query ended, waiting for next IPC message...');
       const nextMessage = await waitForIpcMessage();

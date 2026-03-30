@@ -18,6 +18,7 @@ const BASE_RETRY_MS = 5000;
 interface GroupState {
   active: boolean;
   idleWaiting: boolean;
+  keepAliveContainer: boolean;
   isTaskContainer: boolean;
   runningTaskId: string | null;
   pendingMessages: boolean;
@@ -25,6 +26,7 @@ interface GroupState {
   process: ChildProcess | null;
   containerName: string | null;
   groupFolder: string | null;
+  lastActivityAt: number;
   retryCount: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -44,6 +46,7 @@ export class GroupQueue {
       state = {
         active: false,
         idleWaiting: false,
+        keepAliveContainer: false,
         isTaskContainer: false,
         runningTaskId: null,
         pendingMessages: false,
@@ -51,12 +54,17 @@ export class GroupQueue {
         process: null,
         containerName: null,
         groupFolder: null,
+        lastActivityAt: 0,
         retryCount: 0,
         retryTimer: null,
       };
       this.groups.set(groupJid, state);
     }
     return state;
+  }
+
+  private touchGroup(state: GroupState): void {
+    state.lastActivityAt = Date.now();
   }
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
@@ -108,6 +116,7 @@ export class GroupQueue {
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
       }
+      this.evictOldestIdleContainer(groupJid);
       logger.debug(
         { groupJid, activeCount: this.activeCount },
         'At concurrency limit, message queued',
@@ -149,6 +158,7 @@ export class GroupQueue {
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
       }
+      this.evictOldestIdleContainer(groupJid);
       logger.debug(
         { groupJid, taskId, activeCount: this.activeCount },
         'At concurrency limit, task queued',
@@ -172,6 +182,16 @@ export class GroupQueue {
     state.process = proc;
     state.containerName = containerName;
     if (groupFolder) state.groupFolder = groupFolder;
+    this.touchGroup(state);
+    if (typeof proc.once === 'function') {
+      proc.once('close', () => {
+        this.handlePersistentProcessExit(groupJid, proc);
+      });
+    } else if (typeof proc.on === 'function') {
+      proc.on('close', () => {
+        this.handlePersistentProcessExit(groupJid, proc);
+      });
+    }
   }
 
   /**
@@ -181,6 +201,8 @@ export class GroupQueue {
   notifyIdle(groupJid: string): void {
     const state = this.getGroup(groupJid);
     state.idleWaiting = true;
+    state.keepAliveContainer = true;
+    this.touchGroup(state);
     if (!this.serviceEnabled) return;
     if (state.pendingTasks.length > 0) {
       this.closeStdin(groupJid);
@@ -197,6 +219,8 @@ export class GroupQueue {
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
+    state.keepAliveContainer = true;
+    this.touchGroup(state);
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
@@ -209,6 +233,19 @@ export class GroupQueue {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  resetChatSession(groupJid: string): void {
+    const state = this.getGroup(groupJid);
+    state.pendingMessages = false;
+    state.retryCount = 0;
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+    }
+    if (state.active && !state.isTaskContainer) {
+      this.closeStdin(groupJid);
     }
   }
 
@@ -237,8 +274,10 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
+    state.keepAliveContainer = false;
     state.isTaskContainer = false;
     state.pendingMessages = false;
+    this.touchGroup(state);
     this.activeCount++;
 
     logger.debug(
@@ -261,12 +300,11 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
-      state.active = false;
-      state.process = null;
-      state.containerName = null;
-      state.groupFolder = null;
-      this.activeCount--;
-      this.drainGroup(groupJid);
+      if (state.keepAliveContainer && state.process && !state.isTaskContainer) {
+        logger.debug({ groupJid }, 'Keeping chat container alive after turn');
+        return;
+      }
+      this.clearActiveState(groupJid, state);
     }
   }
 
@@ -276,8 +314,10 @@ export class GroupQueue {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
+    state.keepAliveContainer = false;
     state.isTaskContainer = true;
     state.runningTaskId = task.id;
+    this.touchGroup(state);
     this.activeCount++;
 
     logger.debug(
@@ -290,15 +330,72 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
-      state.active = false;
-      state.isTaskContainer = false;
-      state.runningTaskId = null;
-      state.process = null;
-      state.containerName = null;
-      state.groupFolder = null;
-      this.activeCount--;
-      this.drainGroup(groupJid);
+      this.clearActiveState(groupJid, state);
     }
+  }
+
+  private clearActiveState(groupJid: string, state: GroupState): void {
+    if (state.active) {
+      this.activeCount--;
+    }
+    state.active = false;
+    state.idleWaiting = false;
+    state.keepAliveContainer = false;
+    state.isTaskContainer = false;
+    state.runningTaskId = null;
+    state.process = null;
+    state.containerName = null;
+    state.groupFolder = null;
+    this.drainGroup(groupJid);
+  }
+
+  private handlePersistentProcessExit(
+    groupJid: string,
+    proc: ChildProcess,
+  ): void {
+    const state = this.getGroup(groupJid);
+    if (state.process !== proc || !state.keepAliveContainer) return;
+
+    logger.debug(
+      { groupJid, containerName: state.containerName },
+      'Persistent container exited',
+    );
+    this.clearActiveState(groupJid, state);
+  }
+
+  private evictOldestIdleContainer(requestingGroupJid: string): boolean {
+    let selected: [string, GroupState] | null = null;
+
+    for (const entry of this.groups.entries()) {
+      const [groupJid, state] = entry;
+      if (groupJid === requestingGroupJid) continue;
+      if (
+        !state.active ||
+        !state.idleWaiting ||
+        state.isTaskContainer ||
+        !state.process ||
+        !state.containerName
+      ) {
+        continue;
+      }
+      if (!selected || state.lastActivityAt < selected[1].lastActivityAt) {
+        selected = entry;
+      }
+    }
+
+    if (!selected) return false;
+
+    const [groupJid, state] = selected;
+    logger.info(
+      {
+        evictedGroupJid: groupJid,
+        requestingGroupJid,
+        containerName: state.containerName,
+      },
+      'Evicting oldest idle container to free capacity',
+    );
+    this.closeStdin(groupJid);
+    return true;
   }
 
   private scheduleRetry(groupJid: string, state: GroupState): void {

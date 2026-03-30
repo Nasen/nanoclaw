@@ -14,6 +14,8 @@ import {
 } from './mcp-registry.js';
 
 const IPC_POLL_MS = 500;
+const CONTAINER_GIT_CONFIG_PATH =
+  '/home/node/.config/nanoclaw/git-auth/gitconfig';
 
 interface SessionEntry {
   sessionId: string;
@@ -243,7 +245,9 @@ function createPreCompactHook(
 function loadGlobalPrompt(
   isMain: boolean,
   log: (message: string) => void,
-): { globalClaudeMd?: string; extraDirs: string[] } {
+  personalMode: boolean,
+  agentEnv: Record<string, string | undefined>,
+): { globalClaudeMd?: string; extraDirs: string[]; runtimeContext?: string } {
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!isMain && fs.existsSync(globalClaudeMdPath)) {
@@ -263,7 +267,36 @@ function loadGlobalPrompt(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  return { globalClaudeMd, extraDirs };
+  let runtimeContext: string | undefined;
+  if (extraDirs.length > 0) {
+    const lines = [
+      'Runtime context:',
+      'Mounted extra directories are available at:',
+      ...extraDirs.map((dir) => `- ${dir}`),
+      'Use repositories under /workspace/extra for Git work. /workspace/project is mounted read-only.',
+    ];
+
+    if (
+      personalMode &&
+      agentEnv.GIT_CONFIG_GLOBAL?.trim() === CONTAINER_GIT_CONFIG_PATH
+    ) {
+      lines.push(
+        'Owner-context Git auth is configured in this turn for git CLI over HTTPS or SSH.',
+      );
+    } else if (personalMode) {
+      lines.push(
+        'No dedicated Git auth directory is mounted in this turn, so remote git authentication may fail.',
+      );
+    } else {
+      lines.push(
+        'This turn does not include owner Git auth. Do not assume remote git credentials are available.',
+      );
+    }
+
+    runtimeContext = lines.join('\n');
+  }
+
+  return { globalClaudeMd, extraDirs, runtimeContext };
 }
 
 async function runClaudeTurn(
@@ -280,9 +313,6 @@ async function runClaudeTurn(
     drainIpcInput,
     shouldClose,
   } = context;
-
-  const stream = new MessageStream();
-  stream.push(prompt);
 
   let ipcPolling = true;
   let closedDuringQuery = false;
@@ -310,10 +340,14 @@ async function runClaudeTurn(
   let messageCount = 0;
   let resultCount = 0;
 
-  const { globalClaudeMd, extraDirs } = loadGlobalPrompt(
+  const { globalClaudeMd, extraDirs, runtimeContext } = loadGlobalPrompt(
     containerInput.isMain,
     log,
+    !!containerInput.personalMode,
+    agentEnv,
   );
+  const stream = new MessageStream();
+  stream.push(runtimeContext ? `${runtimeContext}\n\n${prompt}` : prompt);
 
   for await (const message of query({
     prompt: stream,

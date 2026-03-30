@@ -24,6 +24,8 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    libnss-wrapper \
+    openssh-client \
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -58,7 +60,36 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Runs from the image-compiled /app/dist/ (owned by root, not writable by the node user)
 # so a prompt-injected agent cannot modify its own compiled code.
 # Follow-up messages arrive via IPC files in /workspace/ipc/input/
-RUN printf '#!/bin/bash\nset -e\nexec node /app/dist/index.js\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+# When the host runs the container as an arbitrary UID/GID (for bind-mounted
+# repo ownership parity), OpenSSH requires that UID to resolve to a passwd
+# entry. Use nss_wrapper to synthesize one at startup when needed.
+RUN cat <<'EOF' > /app/entrypoint.sh
+#!/bin/bash
+set -e
+
+CURRENT_UID="$(id -u)"
+CURRENT_GID="$(id -g)"
+NSS_WRAPPER_LIB="/usr/lib/x86_64-linux-gnu/libnss_wrapper.so"
+
+if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_UID}:${CURRENT_GID}:" /etc/passwd; then
+  if [ -f "${NSS_WRAPPER_LIB}" ]; then
+    export LD_PRELOAD="${NSS_WRAPPER_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    export NSS_WRAPPER_PASSWD=/tmp/nss-wrapper.passwd
+    export NSS_WRAPPER_GROUP=/tmp/nss-wrapper.group
+
+    cp /etc/passwd "${NSS_WRAPPER_PASSWD}"
+    cp /etc/group "${NSS_WRAPPER_GROUP}"
+
+    echo "nanoclaw:x:${CURRENT_UID}:${CURRENT_GID}:NanoClaw:${HOME:-/home/node}:/bin/sh" >> "${NSS_WRAPPER_PASSWD}"
+    if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_GID}:" /etc/group; then
+      echo "nanoclaw:x:${CURRENT_GID}:" >> "${NSS_WRAPPER_GROUP}"
+    fi
+  fi
+fi
+
+exec node /app/dist/index.js
+EOF
+RUN chmod +x /app/entrypoint.sh
 
 # Allow git to operate in bind-mounted directories owned by any UID.
 # Without this, git refuses to run in /workspace/extra/* because the host

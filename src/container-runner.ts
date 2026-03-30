@@ -35,6 +35,8 @@ export interface ContainerInput {
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
+  lifecycle?: 'query_started' | 'idle_waiting';
+  keptAlive?: boolean;
   newSessionId?: string;
   error?: string;
 }
@@ -118,6 +120,13 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let settled = false;
+
+    const settle = (output: ContainerOutput) => {
+      if (settled) return;
+      settled = true;
+      resolve(output);
+    };
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -155,12 +164,29 @@ export async function runContainerAgent(
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
-            hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
-            resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
+            if (parsed.lifecycle === 'idle_waiting') {
+              disarmTimeout();
+            } else if (parsed.lifecycle === 'query_started') {
+              resetTimeout();
+            } else if (parsed.status === 'error' || parsed.result) {
+              hadStreamingOutput = true;
+              resetTimeout();
+            }
             outputChain = outputChain.then(() => onOutput(parsed));
+            if (parsed.lifecycle === 'idle_waiting') {
+              outputChain.then(() => {
+                logger.info(
+                  { group: group.name, containerName, newSessionId },
+                  'Container parked and waiting for the next message',
+                );
+                settle({
+                  status: 'success',
+                  result: null,
+                  newSessionId,
+                  keptAlive: true,
+                });
+              });
+            }
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },
@@ -209,8 +235,17 @@ export async function runContainerAgent(
     let timedOut = false;
     let hadStreamingOutput = false;
     const timeoutMs = resolveContainerTimeoutMs(group);
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+
+    const disarmTimeout = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+    };
 
     const killOnTimeout = () => {
+      timeout = null;
       timedOut = true;
       logger.error(
         { group: group.name, containerName },
@@ -227,16 +262,15 @@ export async function runContainerAgent(
       });
     };
 
-    let timeout = setTimeout(killOnTimeout, timeoutMs);
-
-    // Reset the timeout whenever there's activity (streaming output)
     const resetTimeout = () => {
-      clearTimeout(timeout);
+      disarmTimeout();
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
 
+    resetTimeout();
+
     container.on('close', (code) => {
-      clearTimeout(timeout);
+      disarmTimeout();
       const duration = Date.now() - startTime;
 
       if (timedOut) {
@@ -264,7 +298,7 @@ export async function runContainerAgent(
             'Container timed out after output (idle cleanup)',
           );
           outputChain.then(() => {
-            resolve({
+            settle({
               status: 'success',
               result: null,
               newSessionId,
@@ -278,7 +312,7 @@ export async function runContainerAgent(
           'Container timed out with no output',
         );
 
-        resolve({
+        settle({
           status: 'error',
           result: null,
           error: `Container timed out after ${timeoutMs}ms`,
@@ -357,7 +391,7 @@ export async function runContainerAgent(
           'Container exited with error',
         );
 
-        resolve({
+        settle({
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
@@ -372,7 +406,7 @@ export async function runContainerAgent(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
           );
-          resolve({
+          settle({
             status: 'success',
             result: null,
             newSessionId,
@@ -384,8 +418,9 @@ export async function runContainerAgent(
       // Legacy mode: parse the last output marker pair from accumulated stdout
       try {
         // Extract JSON between sentinel markers for robust parsing
-        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+        const endIdx =
+          startIdx === -1 ? -1 : stdout.indexOf(OUTPUT_END_MARKER, startIdx);
 
         let jsonLine: string;
         if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
@@ -410,7 +445,7 @@ export async function runContainerAgent(
           'Container completed',
         );
 
-        resolve(output);
+        settle(output);
       } catch (err) {
         logger.error(
           {
@@ -422,7 +457,7 @@ export async function runContainerAgent(
           'Failed to parse container output',
         );
 
-        resolve({
+        settle({
           status: 'error',
           result: null,
           error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
@@ -431,12 +466,12 @@ export async function runContainerAgent(
     });
 
     container.on('error', (err) => {
-      clearTimeout(timeout);
+      disarmTimeout();
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',
       );
-      resolve({
+      settle({
         status: 'error',
         result: null,
         error: `Container spawn error: ${err.message}`,

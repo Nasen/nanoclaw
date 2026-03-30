@@ -27,9 +27,9 @@ describe('shouldPipeMessagesToActiveContainer', () => {
     _resetServiceStateForTests();
   });
 
-  it('disables active-container piping for rc-personal', () => {
+  it('keeps active-container piping for rc-personal', () => {
     expect(shouldPipeMessagesToActiveContainer(makeGroup('rc-personal'))).toBe(
-      false,
+      true,
     );
   });
 

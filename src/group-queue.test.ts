@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { EventEmitter } from 'events';
 
 import { GroupQueue } from './group-queue.js';
 import { logger } from './logger.js';
@@ -56,6 +57,14 @@ vi.mock('fs', async () => {
 
 describe('GroupQueue', () => {
   let queue: GroupQueue;
+
+  function createProcess() {
+    const proc = new EventEmitter() as EventEmitter & {
+      killed?: boolean;
+    };
+    proc.killed = false;
+    return proc as any;
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -169,6 +178,63 @@ describe('GroupQueue', () => {
     expect(executionOrder[0]).toBe('messages'); // first call
     expect(executionOrder[1]).toBe('task'); // task runs first in drain
     // Messages would run after task completes
+  });
+
+  it('keeps an idle chat container active after the initial turn', async () => {
+    const processMessages = vi.fn(async (groupJid: string) => {
+      queue.registerProcess(
+        groupJid,
+        createProcess(),
+        'container-1',
+        'group-1',
+      );
+      queue.notifyIdle(groupJid);
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(processMessages).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenCalledWith(
+      { groupJid: 'group1@g.us' },
+      'Container active, message queued',
+    );
+  });
+
+  it('evicts the oldest idle container when capacity is full', async () => {
+    const processMessages = vi.fn(async (groupJid: string) => {
+      queue.registerProcess(
+        groupJid,
+        createProcess(),
+        `container-${groupJid}`,
+        groupJid,
+      );
+      queue.notifyIdle(groupJid);
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.enqueueMessageCheck('group2@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.enqueueMessageCheck('group3@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evictedGroupJid: 'group1@g.us',
+        requestingGroupJid: 'group3@g.us',
+      }),
+      'Evicting oldest idle container to free capacity',
+    );
   });
 
   // --- Retry with backoff on failure ---

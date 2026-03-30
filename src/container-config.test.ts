@@ -1,16 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const { mockReadEnvFile, mockGetAgentBackendConfig } = vi.hoisted(() => ({
-  mockReadEnvFile: vi.fn(() => ({})),
-  mockGetAgentBackendConfig: vi.fn(() => ({
-    backend: 'openai' as const,
-    model: 'gpt-5-mini',
-    upstreamBaseUrl: 'https://api.openai.com/v1',
-    containerBaseUrlEnvVar: 'OPENAI_BASE_URL' as const,
-    containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
-    authMode: 'api-key' as const,
-  })),
-}));
+const { mockReadEnvFile, mockGetAgentBackendConfig, mockIsPersonalFolder } =
+  vi.hoisted(() => ({
+    mockReadEnvFile: vi.fn(() => ({})),
+    mockGetAgentBackendConfig: vi.fn(() => ({
+      backend: 'openai' as const,
+      model: 'gpt-5-mini',
+      upstreamBaseUrl: 'https://api.openai.com/v1',
+      containerBaseUrlEnvVar: 'OPENAI_BASE_URL' as const,
+      containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
+      authMode: 'api-key' as const,
+    })),
+    mockIsPersonalFolder: vi.fn(() => false),
+  }));
 
 vi.mock('./agent-backend.js', () => ({
   getAgentBackendConfig: mockGetAgentBackendConfig,
@@ -32,6 +34,7 @@ vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
+  GIT_AUTH_DIR: '/tmp/git-auth',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   TIMEZONE: 'Asia/Shanghai',
 }));
@@ -50,7 +53,7 @@ vi.mock('./mount-security.js', () => ({
 }));
 
 vi.mock('./rc-auto-register.js', () => ({
-  isPersonalFolder: vi.fn(() => false),
+  isPersonalFolder: mockIsPersonalFolder,
 }));
 
 vi.mock('fs', async () => {
@@ -71,14 +74,28 @@ vi.mock('fs', async () => {
 
 import { buildContainerArgs } from './container-config.js';
 import { buildVolumeMounts } from './container-config.js';
+import {
+  CONTAINER_GIT_AUTH_DIR,
+  CONTAINER_GIT_CONFIG_PATH,
+  CONTAINER_GIT_SSH_CONFIG_PATH,
+} from './git-auth.js';
 import fs from 'fs';
 
 describe('buildContainerArgs', () => {
   beforeEach(() => {
     mockReadEnvFile.mockReset();
     mockGetAgentBackendConfig.mockClear();
+    mockIsPersonalFolder.mockReset();
+    mockIsPersonalFolder.mockReturnValue(false);
     vi.mocked(fs.existsSync).mockImplementation(
-      (candidate) => candidate === '/tmp/corp-ca.pem',
+      (candidate) =>
+        candidate === '/tmp/corp-ca.pem' || candidate === '/tmp/git-auth',
+    );
+    vi.mocked(fs.statSync).mockImplementation(
+      (candidate) =>
+        ({
+          isDirectory: () => candidate === '/tmp/git-auth',
+        }) as ReturnType<typeof fs.statSync>,
     );
   });
 
@@ -132,5 +149,78 @@ describe('buildContainerArgs', () => {
       containerPath: '/workspace/tls/web-fetch-ca-bundle.pem',
       readonly: true,
     });
+  });
+
+  it('mounts git auth for owner contexts when configured', () => {
+    const mounts = buildVolumeMounts(
+      {
+        name: 'Main Group',
+        folder: 'main',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      },
+      true,
+    );
+
+    expect(mounts).toContainEqual({
+      hostPath: '/tmp/git-auth',
+      containerPath: CONTAINER_GIT_AUTH_DIR,
+      readonly: false,
+    });
+  });
+
+  it('does not mount git auth for non-owner groups', () => {
+    const mounts = buildVolumeMounts(
+      {
+        name: 'External Group',
+        folder: 'external-group',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      },
+      false,
+    );
+
+    expect(
+      mounts.find((mount) => mount.containerPath === CONTAINER_GIT_AUTH_DIR),
+    ).toBeUndefined();
+  });
+
+  it('mounts git auth for personal folders', () => {
+    mockIsPersonalFolder.mockReturnValue(true);
+
+    const mounts = buildVolumeMounts(
+      {
+        name: 'Personal RC',
+        folder: 'rc-personal',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      },
+      false,
+    );
+
+    expect(mounts).toContainEqual({
+      hostPath: '/tmp/git-auth',
+      containerPath: CONTAINER_GIT_AUTH_DIR,
+      readonly: false,
+    });
+  });
+
+  it('injects git auth env when the git auth mount is present', () => {
+    const args = buildContainerArgs(
+      [
+        {
+          hostPath: '/tmp/git-auth',
+          containerPath: CONTAINER_GIT_AUTH_DIR,
+          readonly: false,
+        },
+      ],
+      'test-container',
+      true,
+    );
+
+    expect(args).toContain(`GIT_CONFIG_GLOBAL=${CONTAINER_GIT_CONFIG_PATH}`);
+    expect(args).toContain(
+      `GIT_SSH_COMMAND=ssh -F ${CONTAINER_GIT_SSH_CONFIG_PATH}`,
+    );
   });
 });

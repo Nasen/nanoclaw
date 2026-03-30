@@ -12,6 +12,7 @@ export interface ContainerInput {
 export interface ContainerOutput {
   status: 'success' | 'error';
   result: string | null;
+  lifecycle?: 'query_started' | 'idle_waiting';
   newSessionId?: string;
   error?: string;
 }

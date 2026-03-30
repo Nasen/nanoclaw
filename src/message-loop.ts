@@ -2,9 +2,14 @@ import { ASSISTANT_NAME, POLL_INTERVAL, TIMEZONE } from './config.js';
 import { getMessagesSince, getNewMessages } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { groupNeedsTrigger, hasAllowedTrigger } from './message-gating.js';
-import { findChannel, formatMessages } from './router.js';
+import { findChannel } from './router.js';
 import { loadSenderAllowlist } from './sender-allowlist.js';
 import { isServiceEnabled } from './service-state.js';
+import {
+  buildChatTurnInput,
+  handleReservedSlashCommand,
+  hasAllowedStandaloneSlashCommand,
+} from './slash-commands.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -41,25 +46,47 @@ function shouldSkipGroupMessages(
 ): boolean {
   if (!groupNeedsTrigger(group)) return false;
   const allowlistCfg = loadSenderAllowlist();
-  return !hasAllowedTrigger(chatJid, groupMessages, allowlistCfg);
+  return (
+    !hasAllowedTrigger(chatJid, groupMessages, allowlistCfg) &&
+    !hasAllowedStandaloneSlashCommand(chatJid, groupMessages, allowlistCfg)
+  );
 }
 
 export function shouldPipeMessagesToActiveContainer(
-  group: RegisteredGroup,
+  _group: RegisteredGroup,
 ): boolean {
-  return group.folder !== 'rc-personal';
+  return true;
 }
 
-function pipeOrEnqueueMessages(
+async function pipeOrEnqueueMessages(
   deps: MessageLoopDeps,
   group: RegisteredGroup,
+  channel: Channel,
   chatJid: string,
   messagesToSend: NewMessage[],
-): void {
-  const formatted = formatMessages(messagesToSend, TIMEZONE);
+): Promise<void> {
+  const turnInput = buildChatTurnInput(messagesToSend, TIMEZONE);
+  if (turnInput.slashCommand) {
+    const handled = await handleReservedSlashCommand({
+      slashCommand: turnInput.slashCommand,
+      chatJid,
+      groupFolder: group.folder,
+      queue: deps.queue,
+      sendMessage: (text) => channel.sendMessage(chatJid, text),
+    });
+    if (handled) {
+      deps.setLastAgentTimestamp(
+        chatJid,
+        messagesToSend[messagesToSend.length - 1].timestamp,
+      );
+      deps.saveState();
+      return;
+    }
+  }
+
   if (
     shouldPipeMessagesToActiveContainer(group) &&
-    deps.queue.sendMessage(chatJid, formatted)
+    deps.queue.sendMessage(chatJid, turnInput.text)
   ) {
     logger.debug(
       { chatJid, count: messagesToSend.length },
@@ -151,7 +178,7 @@ async function processPollingCycle(deps: MessageLoopDeps): Promise<void> {
       ASSISTANT_NAME,
     );
     const messagesToSend = allPending.length > 0 ? allPending : groupMessages;
-    pipeOrEnqueueMessages(deps, group, chatJid, messagesToSend);
+    await pipeOrEnqueueMessages(deps, group, channel, chatJid, messagesToSend);
   }
 }
 
