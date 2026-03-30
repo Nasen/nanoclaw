@@ -1769,6 +1769,20 @@ export class RingCentralChannel implements Channel {
     const isGroupMention = !!botMention && text.includes(botMention);
 
     let groups = this.opts.registeredGroups();
+    const registeredGroup = groups[jid];
+    if (
+      this.jidPrefix === 'rcb:' &&
+      registeredGroup &&
+      registeredGroup.folder !== 'rc-personal' &&
+      !registeredGroup.folder.startsWith('rc-grp-')
+    ) {
+      logger.info(
+        { jid, folder: registeredGroup.folder },
+        'Ignoring registered non-owner RC bot DM',
+      );
+      return;
+    }
+
     if (!groups[jid]) {
       // Only the bot-token channel should auto-register unknown contacts.
       // The JWT/user channel sees all RC events and must not register them.

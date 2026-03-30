@@ -1128,6 +1128,60 @@ describe('RingCentralChannel.handleEvent', () => {
     ).toBe('5104955020');
   });
 
+  it('ignores registered RC bot DMs outside rc-personal', async () => {
+    const onMessage = vi.fn();
+    const onChatMetadata = vi.fn();
+    const channel = new RingCentralChannel({
+      onMessage,
+      onChatMetadata,
+      registeredGroups: () => ({
+        'rcb:1596659367938': {
+          name: 'John Lin',
+          folder: 'rc-john-lin',
+          trigger: '@Bob',
+          added_at: '2026-03-26T00:00:00.000Z',
+          requiresTrigger: false,
+        },
+      }),
+      name: 'rc-bot',
+      jidPrefix: 'rcb:',
+      autoRegister: true,
+      creds: {
+        clientId: 'test-client-bot',
+        clientSecret: 'test-secret-bot',
+        botToken: 'test-bot-token',
+      },
+    });
+
+    Object.assign(channel as object, {
+      botExtId: '5104955020',
+    });
+
+    await (
+      channel as unknown as {
+        handleEvent: (event: unknown) => Promise<void>;
+      }
+    ).handleEvent({
+      body: {
+        eventType: 'PostAdded',
+        id: 'post-direct-1',
+        groupId: '1596659367938',
+        creatorId: '608081020',
+        creationTime: '2026-03-26T06:10:00.000Z',
+        text: 'hello from john',
+      },
+    });
+
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(onChatMetadata).toHaveBeenCalledWith(
+      'rcb:1596659367938',
+      '2026-03-26T06:10:00.000Z',
+      undefined,
+      'rc-bot',
+      true,
+    );
+  });
+
   it('routes owner-only service commands from rc-personal to the control callback', async () => {
     const onOwnerCommand = vi.fn(async () => {});
     const channel = new RingCentralChannel({
