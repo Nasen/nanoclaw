@@ -6,14 +6,12 @@ import {
 } from './container-runner.js';
 import { getAllTasks, getSession, setSession } from './db.js';
 import { isMainGroup, isPersonalModeGroup } from './group-access.js';
-import { logger } from './logger.js';
-import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import {
-  isRingCentralChatJid,
-  hasExplicitOnBehalfIntentInMessages,
-  resolveCurrentChatRcDelivery,
-} from './rc-delivery-policy.js';
-import { resolveOutboundTarget } from './router.js';
+  buildGroupTurnPrompt,
+  relayGroupTurnResult,
+  shouldSkipGroupTurnForAutoAssist,
+} from './group-turn-policy.js';
+import { logger } from './logger.js';
 import { getServiceStateVersion, isServiceEnabled } from './service-state.js';
 import {
   buildChatTurnInput,
@@ -124,12 +122,6 @@ interface ProcessGroupMessagesDeps extends RunGroupAgentDeps {
   autoAssistEnabled: () => boolean;
 }
 
-function shouldUsePersonalRcDelivery(
-  messages: Array<{ content: string; is_from_me?: boolean }>,
-): boolean {
-  return hasExplicitOnBehalfIntentInMessages(messages);
-}
-
 export async function processGroupMessages(
   chatJid: string,
   deps: ProcessGroupMessagesDeps,
@@ -171,7 +163,13 @@ export async function processGroupMessages(
   const turnInput = buildChatTurnInput(missedMessages, TIMEZONE);
 
   const personalRcDm = isPersonalRcDm(chatJid, group);
-  if (personalRcDm && !deps.autoAssistEnabled() && !turnInput.slashCommand) {
+  if (
+    shouldSkipGroupTurnForAutoAssist({
+      personalRcDm,
+      autoAssistEnabled: deps.autoAssistEnabled(),
+      hasSlashCommand: Boolean(turnInput.slashCommand),
+    })
+  ) {
     logger.debug(
       { group: group.name },
       'Auto-assist OFF — skipping agent for personal RC DM',
@@ -179,25 +177,15 @@ export async function processGroupMessages(
     return true;
   }
 
-  const autoAssistPrefix =
-    personalRcDm && deps.autoAssistEnabled()
-      ? '[Auto-assistant mode is ON. Nasen is away. Respond on his behalf — including any backlog messages sent while auto-assist was off.]\n\n'
-      : '';
-
-  const onBehalfIntent = shouldUsePersonalRcDelivery(missedMessages);
-  const deliveryDecision = resolveCurrentChatRcDelivery({
+  const { prompt, deliveryDecision } = buildGroupTurnPrompt({
     chatJid,
-    onBehalfIntent,
+    groupFolder: group.folder,
+    messages: missedMessages,
+    turnText: turnInput.text,
+    turnMode: turnInput.mode,
+    personalRcDm,
+    autoAssistEnabled: deps.autoAssistEnabled(),
   });
-  const usePersonalRcDelivery = deliveryDecision.mode === 'personal';
-  const rcRoutingPrefix =
-    chatJid.startsWith('rc:') || chatJid.startsWith('rcb:')
-      ? group.folder === 'rc-personal'
-        ? '[RingCentral routing: For this chat, normal replies use bot delivery by policy. Only explicit on-behalf requests should use personal delivery.]\n\n'
-        : usePersonalRcDelivery
-          ? "[RingCentral routing: The latest user request explicitly asks you to act on Nasen's behalf. Outbound actions for this current chat must use personal delivery.]\n\n"
-          : '[RingCentral routing: Normal replies in RingCentral use bot delivery by policy. Personal delivery is only for explicit on-behalf requests.]\n\n'
-      : '';
 
   if (turnInput.slashCommand) {
     const handled = await handleReservedSlashCommand({
@@ -217,10 +205,6 @@ export async function processGroupMessages(
     }
   }
 
-  const prompt =
-    turnInput.mode === 'raw'
-      ? turnInput.text
-      : autoAssistPrefix + rcRoutingPrefix + turnInput.text;
   const previousCursor = deps.getLastAgentTimestamp(chatJid);
   deps.setLastAgentTimestamp(
     chatJid,
@@ -269,42 +253,13 @@ export async function processGroupMessages(
       }
 
       if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info(
-          { group: group.name },
-          `Agent output: ${raw.slice(0, 200)}`,
-        );
-        if (text) {
-          if (deliveryDecision.policyForced && chatJid.startsWith('rc')) {
-            logger.info(
-              {
-                group: group.name,
-                requestedMode: 'auto',
-                enforcedMode: deliveryDecision.mode,
-              },
-              'Applied host-enforced RingCentral current-chat delivery policy',
-            );
-          }
-          const target = resolveOutboundTarget(
-            deps.channels,
-            chatJid,
-            deliveryDecision.mode,
-          );
-          if (!target) {
-            throw new Error(`No channel for JID: ${chatJid}`);
-          }
-          const outboundText =
-            isRingCentralChatJid(chatJid) &&
-            deliveryDecision.mode === 'personal'
-              ? formatOnBehalfAssistantMessage(text)
-              : text;
-          await target.channel.sendMessage(target.jid, outboundText);
-          outputSentToUser = true;
-        }
+        outputSentToUser = await relayGroupTurnResult({
+          result,
+          groupName: group.name,
+          channels: deps.channels,
+          chatJid,
+          deliveryDecision,
+        });
       }
 
       if (result.status === 'error') {
