@@ -7,6 +7,7 @@ export interface ContainerInput {
   personalMode?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  script?: string;
 }
 
 export interface ContainerOutput {

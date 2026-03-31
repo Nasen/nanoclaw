@@ -9,6 +9,7 @@ const STEPS: Record<
   string,
   () => Promise<{ run: (args: string[]) => Promise<void> }>
 > = {
+  timezone: () => import('./timezone.js'),
   environment: () => import('./environment.js'),
   container: () => import('./container.js'),
   'git-auth': () => import('./git-auth.js'),
