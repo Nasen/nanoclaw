@@ -1,255 +1,228 @@
 # NanoClaw Architecture
 
-> **Audience:** AI coding agents (Claude, Codex, Gemini) contributing to this repo.
-> Read this before making changes to understand how the subsystems relate.
-
----
+> Audience: AI coding agents and maintainers working on this customized NanoClaw fork.
+> This document tracks the current local architecture, not just upstream NanoClaw concepts.
 
 ## Overview
 
-NanoClaw is a **host-side TypeScript service** that bridges messaging channels (WhatsApp, Slack, RingCentral) to AI coding agents running inside isolated Docker containers. It receives chat messages, decides when to route them to an AI agent, runs the agent in a container, and delivers the agent's reply back to the chat.
+NanoClaw is a host-side TypeScript service that accepts messages from connected channels, persists them in SQLite, decides whether a chat should trigger agent execution, and runs the agent inside an isolated container.
 
-```
+The host runtime is now intentionally split into smaller seams so local features can survive future merges from `upstream/main` with less conflict pressure.
+
+```text
 Messaging Channels
   (WhatsApp / Slack / RingCentral)
-         │  inbound messages
-         ▼
-  ┌─────────────┐
-  │  src/index  │  ← entry point: wires everything together
-  └──────┬──────┘
-         │
-   ┌─────┴──────────────────────────────────────────┐
-   │                  Host Runtime                   │
-   │  message-loop ──► group-queue ──► container-runner │
-   │  ipc-watcher                                    │
-   │  credential-proxy                               │
-   └─────────────────────────────────────────────────┘
-         │  Docker exec / stdin
-         ▼
-  ┌──────────────────────────┐
-  │  container/agent-runner  │  ← runs INSIDE the Docker container
-  │  providers/claude.ts     │
-  │  providers/openai.ts     │
-  │  ipc-mcp-stdio.ts        │
-  └──────────────────────────┘
-         │  text reply
-         ▼
-Messaging Channels (outbound)
+         |
+         v
+  app-controls.ts
+    -> inbound gating
+    -> service-control commands
+    -> DB persistence
+         |
+         v
+  app-processing.ts
+    -> message-loop.ts
+    -> group-agent-runner.ts
+         |
+         v
+  group-queue.ts
+    -> sticky per-chat container ownership
+    -> idle eviction / lifecycle tracking
+         |
+         v
+  container-runner.ts
+    -> container-contract.ts
+    -> container-config.ts
+    -> container-timeout.ts
+    -> container-snapshots.ts
+         |
+         v
+  container/agent-runner/src/index.ts
+    -> provider runtime
+    -> MCP stdio bridge
+    -> parked idle session loop
 ```
 
----
+## Runtime Model
 
-## Directory Map
+### Host process
 
-| Path | Purpose |
-|---|---|
-| `src/` | Host app: channels, orchestration, DB, IPC watcher |
-| `src/channels/` | Channel adapters (WhatsApp, Slack, RingCentral) |
-| `container/agent-runner/src/` | Agent logic that runs inside Docker |
-| `container/agent-runner/src/providers/` | Claude & OpenAI provider implementations |
-| `setup/` | One-time setup: env checks, service registration, container verification |
-| `data/` | Runtime state: SQLite DB, IPC dirs, session files |
-| `data/ipc/` | File-based IPC: agent→host message/task drops |
-| `groups/` | Per-group config folders (one subdirectory per registered group) |
-| `logs/` | Service logs (`nanoclaw.log`) |
-| `skills-engine/` | Skill parsing and execution engine |
+The host remains a single Node.js process, but `src/index.ts` is now a composition root instead of owning all orchestration directly.
 
----
+Current host seams:
+- [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts): startup wiring and composition root
+- [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts): persisted runtime state and registered-group state
+- [src/app-controls.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-controls.ts): inbound message handling and service-control commands
+- [src/app-processing.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-processing.ts): message-loop and per-chat processing adapters
+- [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts): subsystem startup, RC host services, IPC dependency wiring, shutdown
 
-## Startup Sequence (`src/index.ts` → `main()`)
+### Container process
 
-1. **Container runtime check** — `ensureContainerRuntimeRunning()` verifies Docker is up; `cleanupOrphans()` kills any leftover containers from the previous run.
-2. **Database init** — `initDatabase()` opens the SQLite database in `data/`.
-3. **State load** — Reads `last_timestamp`, per-group agent cursors, session IDs, and registered groups from the DB.
-4. **Credential proxy** — `startCredentialProxy()` binds an HTTP proxy on `CREDENTIAL_PROXY_PORT`. Containers send all AI API calls through this proxy; it injects real API keys/tokens so containers never hold credentials.
-5. **Channel connect** — `connectInstalledChannels()` and `connectRingCentralChannels()` instantiate and connect all configured channel adapters.
-6. **Subsystems start** (`orchestrator-runtime.ts`):
-   - **Message loop** — polling loop that checks for new DB messages.
-   - **IPC watcher** — polling loop that scans `data/ipc/` for agent→host file drops.
-   - **RC auto-register** — if RingCentral is enabled, watches for new DM/group events.
-   - **Task scheduler** — fires cron/interval/once scheduled tasks for registered groups.
-   - **Remote control** — optional Claude remote-control session manager.
+The container runner remains a separate Node package under `container/agent-runner/`.
 
----
+Current container seams:
+- [container/agent-runner/src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/index.ts): container-side turn loop
+- [container/agent-runner/src/types.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/types.ts): provider-facing runtime types
+- [container/agent-runner/src/providers/](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/providers): backend adapters
+- [container/agent-runner/src/ipc-mcp-stdio.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/ipc-mcp-stdio.ts): host tool bridge over stdio
 
-## Core Data Flow
+## Startup Sequence
 
-### Inbound Message Routing
+1. [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts) verifies the container runtime and cleans up orphaned NanoClaw containers.
+2. SQLite is initialized and [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts) loads:
+   - registered groups
+   - last poll timestamp
+   - per-chat last-agent cursors
+   - persisted session IDs
+   - auto-assist and service-enabled flags
+3. The credential proxy starts.
+4. Installed channels connect.
+5. [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts) starts:
+   - message polling
+   - IPC watcher
+   - scheduler
+   - RC host-side helper APIs
+   - shutdown hooks
 
-```
-Channel adapter (e.g., WhatsApp)
-  └─► onMessage() callback
-         └─► storeMessage() → SQLite messages table
-                └─► message-loop (polling, POLL_INTERVAL ms)
-                       └─► getNewMessages() from DB
-                              └─► groupMessagesByChat()
-                                     └─► shouldSkipGroupMessages()
-                                            (trigger check, sender allowlist)
-                                     └─► pipeOrEnqueueMessages()
-                                            ├─ if container running: send via stdin (GroupQueue)
-                                            └─ else: enqueueMessageCheck(chatJid) → GroupQueue
-```
+## Core Flows
 
-### Agent Invocation
+### Inbound message flow
 
-```
-GroupQueue.dequeue(chatJid)
-  └─► processGroupMessages() (group-agent-runner.ts)
-         ├─ getMessagesSince(lastAgentTimestamp)
-         ├─ format prompt
-         ├─ writeTasksSnapshot() + writeGroupsSnapshot() → /workspace/ JSON files
-         └─► runContainerAgent() (container-runner.ts)
-                └─► docker run nanoclaw-agent-v3
-                       └─► container/agent-runner/src/index.ts
-                              └─► provider (claude.ts | openai.ts)
-                                     └─► streams output chunks back to host
+```text
+Channel adapter
+  -> buildChannelOpts() in app-controls.ts
+  -> storeMessage() / storeChatMetadata()
+  -> message-loop.ts polling cycle
+  -> group-queue.ts
+  -> group-agent-runner.ts
 ```
 
-### Agent Output → Channel Reply
+Notes:
+- service-control commands are intercepted before normal message storage
+- sender allowlist checks happen on inbound storage and again during trigger evaluation
+- slash commands are routed before a normal prompt turn is sent
 
+### Per-chat agent turn flow
+
+```text
+group-agent-runner.ts
+  -> buildChatTurnInput() / slash-commands.ts
+  -> group-turn-policy.ts
+  -> writeTasksSnapshot() / writeGroupsSnapshot()
+  -> runContainerAgent()
+  -> relayGroupTurnResult()
 ```
-container-runner output callback
-  └─► strip <internal>…</internal> tags
-  └─► resolveOutboundTarget() (router.ts)
-         └─► channel.sendMessage(jid, text)
-```
 
----
+Relevant seams:
+- [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts): orchestration only
+- [src/group-turn-policy.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-turn-policy.ts): prompt shaping, auto-assist behavior, outbound delivery policy
+- [src/slash-commands.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/slash-commands.ts): `/reset` interception and raw slash forwarding rules
 
-## Key Modules
+### Sticky session and parked-container flow
 
-### `src/message-loop.ts`
-The main polling loop. Every `POLL_INTERVAL` ms it calls `processPollingCycle()`:
-- Fetches all messages newer than `lastTimestamp` for registered group JIDs.
-- Groups messages by chat JID.
-- Checks trigger words and sender allowlist.
-- Either pipes directly to the active container's stdin (if the container is running) or enqueues a check via `GroupQueue`.
+NanoClaw currently uses a one-chat-one-session model.
 
-### `src/group-queue.ts`
-Serializes agent runs per chat group. Ensures only one container runs at a time per group. Accepts `enqueueMessageCheck(chatJid)` calls; drains the queue by calling `processGroupMessages` sequentially.
+- each registered chat persists a session ID in SQLite
+- the active container may stay parked in `idle_waiting` after a turn
+- follow-up messages are piped to the parked container when possible
+- oldest idle chat containers can be evicted when capacity is full
+- a reset, eviction, process restart, or container failure may create a new container, but the chat session is resumed from persisted session state when possible
 
-### `src/group-agent-runner.ts`
-Orchestrates one complete agent turn:
-1. Optionally prepends auto-assist or RingCentral routing prefixes to the prompt.
-2. Writes task/group snapshots so the agent can discover what groups/tasks exist.
-3. Calls `runContainerAgent()` and streams results back.
-4. On error with no output sent, rolls back `lastAgentTimestamp` so the turn is retried.
+The main lifecycle logic spans:
+- [src/group-queue.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-queue.ts)
+- [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts)
+- [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts)
+- [container/agent-runner/src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/index.ts)
 
-### `src/container-runner.ts`
-Runs the Docker container. Passes configuration as environment variables, mounts the group workspace at `/workspace`, and manages the container lifecycle (start, stream stdout, kill on timeout).
+### IPC flow
 
-### `src/credential-proxy.ts`
-Transparent HTTP proxy listening on `127.0.0.1:CREDENTIAL_PROXY_PORT`. Injects API keys/OAuth tokens on every request so containers only need a placeholder. Supports both `api-key` and `oauth` auth modes, and both Claude and OpenAI backends.
+The old monolithic IPC module has been split.
 
-### `src/ipc.ts` + `src/ipc-message-handler.ts` + `src/ipc-task-handler.ts`
-File-based IPC. The agent running inside the container writes JSON files to `/workspace/ipc/messages/` or `/workspace/ipc/tasks/`. The host IPC watcher (`startIpcWatcher`) polls `data/ipc/` and processes them:
-- **Messages**: agent sends a message to a chat JID.
-- **Tasks**: agent creates/updates/deletes scheduled tasks.
+- [src/ipc.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc.ts): thin barrel
+- [src/ipc-watcher.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-watcher.ts): directory polling and dispatch
+- [src/ipc-task-handler.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-task-handler.ts): task mutations and host actions
+- [src/ipc-message-handler.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-message-handler.ts): outbound file-based message delivery
+- [src/ipc-types.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-types.ts): watcher dependency surface
 
-### `src/ipc.ts` IPC directory layout
-```
+IPC directory layout:
+
+```text
 data/ipc/
   {groupFolder}/
-    messages/   ← agent drops {uuid}.json files here
-    tasks/      ← agent drops task mutation JSON files here
-  errors/       ← failed IPC files moved here for inspection
+    input/
+    messages/
+    tasks/
+  errors/
 ```
 
-### `src/remote-control.ts`
-Spawns `claude remote-control` as a detached child process and polls its stdout file (every `URL_POLL_MS = 200ms`) until the Claude.ai session URL appears or a 30-second timeout. Saves session state to `data/remote-control.json` so it survives host restarts.
+## Container Boundary
 
-### `src/db.ts`
-SQLite (via `better-sqlite3`) single-file database in `data/`. Key tables:
-- `messages` — all inbound messages, indexed by JID and timestamp.
-- `chats` — discovered chats and their last-activity metadata.
-- `registered_groups` — groups the agent is activated for.
-- `sessions` — persisted Claude/OpenAI session IDs per group folder.
-- `scheduled_tasks` + `task_run_logs` — cron/interval task definitions and history.
-- `router_state` — arbitrary key/value pairs for persistent host state.
+The host/container contract is now split more explicitly:
 
----
+- [src/container-contract.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-contract.ts): host-side protocol markers and container I/O types
+- [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts): mount/env construction, personal-mode and main-folder inheritance, Git auth mounting
+- [src/container-timeout.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-timeout.ts): timeout policy
+- [src/container-snapshots.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-snapshots.ts): task/group snapshots written into IPC-visible files
+- [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts): actual spawn, stream parsing, timeout handling, log capture
 
-## Channel System (`src/channels/`)
+Important current behaviors:
+- main folders inherit the extra mount profile from `rc-personal`
+- owner-context containers may receive dedicated Git auth mounts
+- `/workspace/project` stays read-only
+- sticky containers are kept alive between turns until TTL, eviction, reset, restart, or failure
 
-All channels implement the `Channel` interface from `src/types.ts`:
+## Trust and Access Model
 
-```typescript
-interface Channel {
-  name: string;
-  connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
-  isConnected(): boolean;
-  ownsJid(jid: string): boolean;
-  disconnect(): Promise<void>;
-  setTyping?(jid: string, isTyping: boolean): Promise<void>;
-  syncGroups?(force: boolean): Promise<void>;
-}
-```
+This fork currently distinguishes several practical trust levels in code:
 
-Channels self-register via `registerChannel()` in `src/channels/registry.ts`. Each file imports `registerChannel` and calls it at module load time.
+- owner personal chat: `rc-personal`
+- trusted admin/main folders: entries in `groups/direct-contacts.json -> mainFolders`
+- normal registered groups
+- blocked non-owner RC DMs
 
-| Channel | JID format | Notes |
-|---|---|---|
-| WhatsApp | `{phone}@s.whatsapp.net` / `{id}@g.us` | Baileys library; LID→phone translation built-in |
-| Slack | (workspace-specific) | Event-based via Bolt |
-| RingCentral | `rc:{chatId}` / `rcb:{chatId}` | Supports `personal`/`bot` delivery modes |
+Not all of this is yet centralized behind one formal policy module. Some trust behavior still lives across:
+- [src/group-access.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-access.ts)
+- [src/message-gating.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/message-gating.ts)
+- [src/service-control.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/service-control.ts)
+- [src/channels/ringcentral.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/channels/ringcentral.ts)
+- [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts)
 
----
+That is the next major hardening seam if future work continues.
 
-## Container Agent (`container/agent-runner/`)
+## Key Files
 
-A separate Node.js package that runs **inside** Docker. Entry point: `src/index.ts`.
-
-- Reads the prompt and config from environment variables passed by the host.
-- Selects provider (`claude` or `openai`) at runtime.
-- `providers/claude.ts` — wraps Claude Code CLI or the Claude SDK, streams tool use and text output.
-- `providers/openai.ts` — wraps OpenAI Responses API with MCP tool integration.
-- `ipc-mcp-stdio.ts` — exposes an MCP server over stdio so the agent can call host-side tools (e.g., `send_message`, `register_group`, `list_chats`).
-
-The agent communicates results back to the host by writing to stdout (captured by `container-runner.ts`).
-
----
-
-## Security Model
-
-- **Credential isolation**: Containers never hold real API keys. All AI API traffic is proxied through the host credential proxy.
-- **Mount allowlist**: `~/.config/nanoclaw/mount-allowlist.json` controls which host directories can be bind-mounted into containers. This file is NOT mounted into containers (tamper-proof).
-- **Sender allowlist**: `sender-allowlist.ts` can restrict which chat JIDs or senders can trigger the agent.
-- **Non-main groups**: By default, additional group mounts are read-only (`nonMainReadOnly: true`).
-
----
-
-## Adding a New Channel
-
-1. Create `src/channels/{name}.ts`.
-2. Implement the `Channel` interface.
-3. Call `registerChannel('{name}', (opts) => new YourChannel(opts))` at the bottom.
-4. Import the file in `src/channels/index.ts` (side-effect import).
-5. Add any environment variables to `src/config.ts` and `.env.example`.
-6. Update `connectInstalledChannels()` in `src/channel-bootstrap.ts` if conditional logic is needed.
-
-## Adding a New Agent Provider
-
-1. Create `container/agent-runner/src/providers/{name}.ts`.
-2. Export a `run(config)` function that streams output chunks to the host callback.
-3. Re-export / register it in `container/agent-runner/src/providers/index.ts`.
-4. Add a branch in `container/agent-runner/src/index.ts` to select it based on the `AGENT_BACKEND` env var.
-5. Add any credential-proxy auth mode support in `src/credential-proxy.ts` if needed.
-
----
-
-## Environment Variables (Key Ones)
-
-| Variable | Description |
+| File | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` | Claude credentials (injected by proxy) |
-| `OPENAI_API_KEY` | OpenAI credentials (injected by proxy) |
-| `AGENT_BACKEND` | `claude` (default) or `openai` |
-| `ASSISTANT_NAME` | Bot trigger name (e.g. `@nanoclaw`) |
-| `CREDENTIAL_PROXY_PORT` | Port for the credential proxy (default: 9999) |
-| `POLL_INTERVAL` | DB polling interval in ms (default: 1000) |
-| `IDLE_TIMEOUT` | Agent idle timeout in ms before stdin closes |
-| `CONTAINER_IMAGE` | Docker image tag to run agents in |
-| `TIMEZONE` | Timezone for message formatting |
+| [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts) | Startup composition root |
+| [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts) | Persisted runtime state and group registry |
+| [src/app-controls.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-controls.ts) | Inbound channel callbacks and service control |
+| [src/app-processing.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-processing.ts) | Message-loop/process-group adapters |
+| [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts) | Per-chat turn orchestration |
+| [src/group-turn-policy.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-turn-policy.ts) | Prompt shaping and outbound delivery policy |
+| [src/group-queue.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-queue.ts) | Per-chat execution ownership and idle eviction |
+| [src/slash-commands.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/slash-commands.ts) | Slash routing and host-owned commands |
+| [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts) | Mounts, env, personal/main-folder privilege construction |
+| [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts) | Container spawn and streaming output handling |
+| [src/container-contract.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-contract.ts) | Host-side container protocol |
+| [src/container-snapshots.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-snapshots.ts) | Task/group snapshot writers |
+| [src/ipc-watcher.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-watcher.ts) | IPC transport loop |
+| [src/ipc-task-handler.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-task-handler.ts) | IPC capability handling |
+| [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts) | Subsystem startup and host-side service APIs |
+| [src/db.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/db.ts) | SQLite persistence |
 
-See `.env.example` for the full list.
+## Merge-Hardening Guidance
+
+These are the local seams that now exist specifically to reduce future merge pain with `upstream/main`:
+
+- keep `src/index.ts` thin; do not move policy back into it
+- keep IPC transport concerns in `src/ipc-watcher.ts`, not `src/ipc.ts`
+- keep container protocol, timeout policy, and snapshot writing out of `src/container-runner.ts`
+- keep group prompt/delivery policy in `src/group-turn-policy.ts`, not mixed back into `src/group-agent-runner.ts`
+
+Current remaining hot spots for future merges:
+- [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts)
+- [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts)
+- [container/agent-runner/src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/index.ts)
+- [src/channels/ringcentral.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/channels/ringcentral.ts)
+
+For branch and upstream maintenance workflow, also see [docs/BRANCH-FORK-MAINTENANCE.md](/Users/nasen.you/Projects/GH/NanoClaw/docs/BRANCH-FORK-MAINTENANCE.md).

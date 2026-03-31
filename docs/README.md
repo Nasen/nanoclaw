@@ -2,7 +2,18 @@
 
 The official documentation is at **[docs.nanoclaw.dev](https://docs.nanoclaw.dev)**.
 
-The files in this directory are original design documents and developer references. For the most current and accurate information, use the documentation site.
+The files in this directory are original design documents and developer references.
+
+For upstream NanoClaw concepts, prefer the documentation site.
+For this customized local fork, prefer the checked-in architecture references first, because local session, IPC, container, RC, and merge-hardening behavior can move ahead of the public docs.
+
+## Current Local References
+
+| Local file | Purpose |
+|---|---|
+| [../ARCHITECTURE.md](../ARCHITECTURE.md) | Current local architecture, module seams, session/container model |
+| [BRANCH-FORK-MAINTENANCE.md](BRANCH-FORK-MAINTENANCE.md) | Upstream merge strategy and downstream merge-hardening guidance |
+| [SECURITY.md](SECURITY.md) | Current local security model |
 
 | This directory | Documentation site |
 |---|---|

@@ -156,14 +156,18 @@ Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Respon
 
 Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Per-group message queue with concurrency control. IPC via filesystem.
 
-For the full architecture details, see the [documentation site](https://docs.nanoclaw.dev/concepts/architecture).
+Current local forks often carry additional seams for session persistence, IPC handling, security policy, and upstream merge hardening. For the current checked-in module map, see [ARCHITECTURE.md](ARCHITECTURE.md). For upstream concepts, see the [documentation site](https://docs.nanoclaw.dev/concepts/architecture).
 
 Key files:
-- `src/index.ts` - Orchestrator: state, message loop, agent invocation
+- `src/index.ts` - Startup composition root
+- `src/app-runtime-state.ts` - Persisted runtime state and registered groups
+- `src/app-processing.ts` - Message-loop and per-chat processing adapters
 - `src/channels/registry.ts` - Channel registry (self-registration at startup)
-- `src/ipc.ts` - IPC watcher and task processing
+- `src/ipc.ts` - Thin IPC barrel
+- `src/ipc-watcher.ts` - IPC transport loop
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
+- `src/container-contract.ts` - Host/container protocol markers and types
 - `src/container-runner.ts` - Spawns streaming agent containers
 - `src/task-scheduler.ts` - Runs scheduled tasks
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)

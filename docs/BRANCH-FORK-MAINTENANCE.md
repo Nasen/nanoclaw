@@ -1,5 +1,7 @@
 # Branch & Fork Maintenance Guidelines
 
+This file covers both upstream NanoClaw branch strategy and the practical merge discipline for customized downstreams like this repo.
+
 ## Structure
 
 **`qwibitai/nanoclaw`** (upstream) — core engine with skill definitions (`.claude/skills/`). No channel code on `main`.
@@ -66,6 +68,62 @@ Source code changes (e.g. `src/types.ts`, `src/index.ts`) usually auto-merge cle
 ## When to merge forward
 
 After any main change that touches shared files (`package.json`, `src/index.ts`, `CLAUDE.md`, etc.). Small frequent merges = trivial conflicts. Large infrequent merges = painful.
+
+## Customized Downstream Guidance
+
+For a customized install that carries local channel logic, RC automation, security policy, sticky sessions, or GitOps behavior, the main goal is to keep local changes additive and modular so upstream merges land at stable seams instead of colliding inside hot orchestration files.
+
+### Current merge-seam modules
+
+These files were split specifically to reduce repeated conflicts:
+
+| Area | Preferred seam |
+|------|----------------|
+| App startup and state wiring | `src/index.ts`, `src/app-runtime-state.ts`, `src/app-controls.ts`, `src/app-processing.ts` |
+| Group prompt and delivery policy | `src/group-agent-runner.ts`, `src/group-turn-policy.ts`, `src/slash-commands.ts` |
+| IPC transport vs capability handling | `src/ipc.ts`, `src/ipc-watcher.ts`, `src/ipc-types.ts`, `src/ipc-task-handler.ts` |
+| Container protocol and lifecycle | `src/container-contract.ts`, `src/container-runner.ts`, `src/container-timeout.ts`, `src/container-snapshots.ts` |
+
+### Rules for future feature work
+
+- Prefer new local modules over expanding upstream hot files.
+- If a change is NanoClaw-specific policy, put it beside the seam module that already owns that concern.
+- If a change affects host/container payload structure, update the contract boundary deliberately and document it in `ARCHITECTURE.md`.
+- Avoid pushing local RC policy, sticky-session policy, or security logic back into `src/index.ts`.
+- Avoid turning `src/ipc.ts` back into a monolith.
+
+### Remaining hot spots
+
+These files are still likely to conflict with upstream:
+
+- `src/container-config.ts`
+- `src/orchestrator-runtime.ts`
+- `container/agent-runner/src/index.ts`
+- `src/channels/ringcentral.ts`
+
+When merging upstream into a customized branch:
+
+1. Merge upstream into the current branch early and often.
+2. Reapply upstream logic at the seam boundary first.
+3. Keep local policy in the local helper/module unless upstream made that module obsolete.
+4. Run focused verification immediately after resolving each hotspot.
+
+### Recommended merge cadence
+
+- Merge `upstream/main` at least weekly when actively customizing.
+- Enable and keep `git rerere` on.
+- Prefer several small merge checkpoints over one large catch-up merge.
+
+### Minimum post-merge verification
+
+At minimum:
+
+```bash
+npm run typecheck
+npm test -- src/group-agent-runner.test.ts src/container-runner.test.ts src/ipc-auth.test.ts src/message-loop.test.ts
+```
+
+If container or channel code changed, also verify the running service after rebuild/restart.
 
 ## Fork setup
 
