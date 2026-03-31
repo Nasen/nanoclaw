@@ -1,6 +1,4 @@
-import {
-  runContainerAgent,
-} from './container-runner.js';
+import { runContainerAgent } from './container-runner.js';
 import { ContainerOutput } from './container-contract.js';
 import {
   writeGroupsSnapshot,
