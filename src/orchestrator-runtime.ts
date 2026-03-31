@@ -13,7 +13,8 @@ import {
   RcPresenceUpdateInput,
   RingCentralChannel,
 } from './channels/ringcentral.js';
-import { writeGroupsSnapshot } from './container-runner.js';
+import { AvailableGroup } from './container-contract.js';
+import { writeGroupsSnapshot } from './container-snapshots.js';
 import { startIpcWatcher } from './ipc.js';
 import { logger } from './logger.js';
 import { addNotebookLmSources, createNotebookLmClient } from './notebooklm.js';
@@ -23,8 +24,7 @@ import { Channel, RcDeliveryMode, RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
 type RegisteredGroupsGetter = () => Record<string, RegisteredGroup>;
-type AvailableGroupsGetter =
-  () => import('./container-runner.js').AvailableGroup[];
+type AvailableGroupsGetter = () => AvailableGroup[];
 
 function getRcChannel(
   channels: Channel[],

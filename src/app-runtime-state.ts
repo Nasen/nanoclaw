@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { AvailableGroup } from './container-runner.js';
+import { AvailableGroup } from './container-contract.js';
 import {
   getAllChats,
   getAllRegisteredGroups,

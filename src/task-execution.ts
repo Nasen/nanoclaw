@@ -4,10 +4,10 @@ import fs from 'fs';
 
 import { ASSISTANT_NAME, TIMEZONE } from './config.js';
 import {
-  ContainerOutput,
   runContainerAgent,
-  writeTasksSnapshot,
 } from './container-runner.js';
+import { ContainerOutput } from './container-contract.js';
+import { writeTasksSnapshot } from './container-snapshots.js';
 import {
   getAllTasks,
   logTaskRun,

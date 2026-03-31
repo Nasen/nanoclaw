@@ -12,6 +12,9 @@ const {
 
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: mockRunContainerAgent,
+}));
+
+vi.mock('./container-snapshots.js', () => ({
   writeGroupsSnapshot: mockWriteGroupsSnapshot,
   writeTasksSnapshot: mockWriteTasksSnapshot,
 }));
@@ -21,7 +24,7 @@ import {
   runGroupAgent,
   shouldCloseContainerAfterTurn,
 } from './group-agent-runner.js';
-import type { ContainerOutput } from './container-runner.js';
+import type { ContainerOutput } from './container-contract.js';
 import type { RegisteredGroup } from './types.js';
 
 function makeGroup(folder: string): RegisteredGroup {

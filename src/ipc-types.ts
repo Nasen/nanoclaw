@@ -1,4 +1,4 @@
-import { AvailableGroup } from './container-runner.js';
+import { AvailableGroup } from './container-contract.js';
 import {
   NotebookLmAddSourcesResult,
   NotebookLmNotebook,

@@ -7,6 +7,9 @@ const { mockRunContainerAgent, mockWriteTasksSnapshot } = vi.hoisted(() => ({
 
 vi.mock('./container-runner.js', () => ({
   runContainerAgent: mockRunContainerAgent,
+}));
+
+vi.mock('./container-snapshots.js', () => ({
   writeTasksSnapshot: mockWriteTasksSnapshot,
 }));
 

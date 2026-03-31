@@ -1,4 +1,4 @@
-import { ContainerOutput } from './container-runner.js';
+import { ContainerOutput } from './container-contract.js';
 import { logger } from './logger.js';
 import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import {

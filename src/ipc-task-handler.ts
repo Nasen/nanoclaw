@@ -57,11 +57,11 @@ export interface TaskIpcDeps {
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
-  getAvailableGroups: () => import('./container-runner.js').AvailableGroup[];
+  getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
     groupFolder: string,
     isMain: boolean,
-    availableGroups: import('./container-runner.js').AvailableGroup[],
+    availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
   rcListChats: (
@@ -889,3 +889,4 @@ export async function processTaskIpc(
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
 }
+import { AvailableGroup } from './container-contract.js';

@@ -2,9 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
-
 vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
@@ -82,7 +79,12 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { ContainerOutput, runContainerAgent } from './container-runner.js';
+import {
+  ContainerOutput,
+  OUTPUT_END_MARKER,
+  OUTPUT_START_MARKER,
+} from './container-contract.js';
+import { runContainerAgent } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {

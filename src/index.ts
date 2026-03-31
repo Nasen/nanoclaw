@@ -21,6 +21,7 @@ import {
   ensureContainerRuntimeRunning,
   PROXY_BIND_HOST,
 } from './container-runtime.js';
+import { AvailableGroup } from './container-contract.js';
 import { initDatabase } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { formatMessages } from './router.js';
@@ -44,7 +45,7 @@ const state = createAppRuntimeState();
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
  */
-export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
+export function getAvailableGroups(): AvailableGroup[] {
   return state.getAvailableGroups();
 }
 

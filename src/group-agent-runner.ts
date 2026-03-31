@@ -1,9 +1,11 @@
 import {
-  ContainerOutput,
   runContainerAgent,
+} from './container-runner.js';
+import { ContainerOutput } from './container-contract.js';
+import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
-} from './container-runner.js';
+} from './container-snapshots.js';
 import { getAllTasks, getSession, setSession } from './db.js';
 import { isMainGroup, isPersonalModeGroup } from './group-access.js';
 import {
@@ -21,12 +23,7 @@ import {
 import { RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
-interface AvailableGroup {
-  jid: string;
-  name: string;
-  lastActivity: string;
-  isRegistered: boolean;
-}
+import { AvailableGroup } from './container-contract.js';
 
 interface RunGroupAgentDeps {
   queue: GroupQueue;

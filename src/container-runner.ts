@@ -6,55 +6,19 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { CONTAINER_MAX_OUTPUT_SIZE, CONTAINER_TIMEOUT } from './config.js';
+import { CONTAINER_MAX_OUTPUT_SIZE } from './config.js';
 import { buildContainerArgs, buildVolumeMounts } from './container-config.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
+import {
+  ContainerInput,
+  ContainerOutput,
+  OUTPUT_END_MARKER,
+  OUTPUT_START_MARKER,
+} from './container-contract.js';
+import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, stopContainer } from './container-runtime.js';
+import { resolveContainerTimeoutMs } from './container-timeout.js';
 import { RegisteredGroup } from './types.js';
-
-// Sentinel markers for robust output parsing (must match agent-runner)
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
-
-export interface ContainerInput {
-  prompt: string;
-  sessionId?: string;
-  groupFolder: string;
-  chatJid: string;
-  isMain: boolean;
-  /** true = owner context (full MCP capabilities: Gmail, Jira, GitLab, etc.)
-   *  false = proxy context (nanoclaw IPC only — no personal data access)
-   *  Applies to: isMain group OR the rc-personal folder. All auto-registered
-   *  external contacts (rc-john-lin, rc-grp-*, etc.) are proxy context. */
-  personalMode?: boolean;
-  isScheduledTask?: boolean;
-  assistantName?: string;
-  script?: string;
-}
-
-export interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  lifecycle?: 'query_started' | 'idle_waiting';
-  keptAlive?: boolean;
-  newSessionId?: string;
-  error?: string;
-}
-
-const DEFAULT_RC_PERSONAL_CONTAINER_TIMEOUT_MS = 4 * 60 * 1000;
-
-function resolveContainerTimeoutMs(group: RegisteredGroup): number {
-  if (group.containerConfig?.timeout) {
-    return group.containerConfig.timeout;
-  }
-
-  if (group.folder === 'rc-personal') {
-    return DEFAULT_RC_PERSONAL_CONTAINER_TIMEOUT_MS;
-  }
-
-  return CONTAINER_TIMEOUT;
-}
 
 export async function runContainerAgent(
   group: RegisteredGroup,
@@ -479,69 +443,4 @@ export async function runContainerAgent(
       });
     });
   });
-}
-
-export function writeTasksSnapshot(
-  groupFolder: string,
-  isMain: boolean,
-  tasks: Array<{
-    id: string;
-    groupFolder: string;
-    prompt: string;
-    script?: string | null;
-    schedule_type: string;
-    schedule_value: string;
-    status: string;
-    next_run: string | null;
-  }>,
-): void {
-  // Write filtered tasks to the group's IPC directory
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
-
-  // Main sees all tasks, others only see their own
-  const filteredTasks = isMain
-    ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
-
-  const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
-}
-
-export interface AvailableGroup {
-  jid: string;
-  name: string;
-  lastActivity: string;
-  isRegistered: boolean;
-}
-
-/**
- * Write available groups snapshot for the container to read.
- * Only main group can see all available groups (for activation).
- * Non-main groups only see their own registration status.
- */
-export function writeGroupsSnapshot(
-  groupFolder: string,
-  isMain: boolean,
-  groups: AvailableGroup[],
-  registeredJids: Set<string>,
-): void {
-  const groupIpcDir = resolveGroupIpcPath(groupFolder);
-  fs.mkdirSync(groupIpcDir, { recursive: true });
-
-  // Main sees all groups; others see nothing (they can't activate groups)
-  const visibleGroups = isMain ? groups : [];
-
-  const groupsFile = path.join(groupIpcDir, 'available_groups.json');
-  fs.writeFileSync(
-    groupsFile,
-    JSON.stringify(
-      {
-        groups: visibleGroups,
-        lastSync: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  );
 }
