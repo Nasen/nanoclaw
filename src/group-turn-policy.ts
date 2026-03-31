@@ -16,9 +16,7 @@ export function shouldSkipGroupTurnForAutoAssist(params: {
   hasSlashCommand: boolean;
 }): boolean {
   return (
-    params.personalRcDm &&
-    !params.autoAssistEnabled &&
-    !params.hasSlashCommand
+    params.personalRcDm && !params.autoAssistEnabled && !params.hasSlashCommand
   );
 }
 
@@ -79,7 +77,10 @@ export async function relayGroupTurnResult(params: {
       : JSON.stringify(params.result.result);
   const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 
-  logger.info({ group: params.groupName }, `Agent output: ${raw.slice(0, 200)}`);
+  logger.info(
+    { group: params.groupName },
+    `Agent output: ${raw.slice(0, 200)}`,
+  );
   if (!text) return false;
 
   if (params.deliveryDecision.policyForced && params.chatJid.startsWith('rc')) {

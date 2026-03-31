@@ -54,7 +54,9 @@ describe('buildGroupTurnPrompt', () => {
     });
 
     expect(result.prompt).toContain('Auto-assistant mode is ON');
-    expect(result.prompt).toContain('normal replies use bot delivery by policy');
+    expect(result.prompt).toContain(
+      'normal replies use bot delivery by policy',
+    );
     expect(result.prompt).toContain('formatted prompt');
   });
 });

@@ -70,7 +70,10 @@ export function createAppRuntimeState(): AppRuntimeState {
     registeredGroups[jid] = group;
     setRegisteredGroup(jid, group);
 
-    const groupDir = path.join(GROUPS_DIR || path.join(DATA_DIR, '..', 'groups'), group.folder);
+    const groupDir = path.join(
+      GROUPS_DIR || path.join(DATA_DIR, '..', 'groups'),
+      group.folder,
+    );
     fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
     logger.info(

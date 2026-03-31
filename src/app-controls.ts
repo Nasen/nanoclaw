@@ -5,10 +5,7 @@ import {
   isAdminServiceControlGroup,
   parseServiceToggleCommand,
 } from './service-control.js';
-import {
-  isServiceEnabled,
-  setRuntimeServiceEnabled,
-} from './service-state.js';
+import { isServiceEnabled, setRuntimeServiceEnabled } from './service-state.js';
 import { logger } from './logger.js';
 import {
   isSenderAllowed,

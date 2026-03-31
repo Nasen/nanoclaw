@@ -1,6 +1,4 @@
-import {
-  CREDENTIAL_PROXY_PORT,
-} from './config.js';
+import { CREDENTIAL_PROXY_PORT } from './config.js';
 import { createAppRuntimeState } from './app-runtime-state.js';
 import {
   buildChannelOpts,
@@ -23,9 +21,7 @@ import {
   ensureContainerRuntimeRunning,
   PROXY_BIND_HOST,
 } from './container-runtime.js';
-import {
-  initDatabase,
-} from './db.js';
+import { initDatabase } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { formatMessages } from './router.js';
 import { buildServiceToggleConfirmation } from './service-control.js';
