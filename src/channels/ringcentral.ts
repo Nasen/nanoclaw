@@ -357,7 +357,22 @@ function extractPersonIdFromRef(ref: string): string | undefined {
   const trimmed = ref.trim();
   const mentionMatch = trimmed.match(/^!\[:Person\]\((\d+)\)$/i);
   if (mentionMatch) return mentionMatch[1];
-  return /^\d+$/.test(trimmed) ? trimmed : undefined;
+  return undefined;
+}
+
+function extractTeamIdFromRef(ref: string): string | undefined {
+  const trimmed = ref.trim();
+  const mentionMatch = trimmed.match(/^!\[:Team\]\((\d+)\)$/i);
+  if (mentionMatch) return mentionMatch[1];
+  return undefined;
+}
+
+function splitIntoPostChunks(text: string): string[] {
+  return text.length <= MAX_CHUNK
+    ? [text]
+    : Array.from({ length: Math.ceil(text.length / MAX_CHUNK) }, (_, i) =>
+        text.slice(i * MAX_CHUNK, (i + 1) * MAX_CHUNK),
+      );
 }
 
 async function sendPost(
@@ -1004,15 +1019,7 @@ export class RingCentralChannel implements Channel {
     }
 
     try {
-      // Chunk oversized messages
-      const chunks =
-        text.length <= MAX_CHUNK
-          ? [text]
-          : Array.from({ length: Math.ceil(text.length / MAX_CHUNK) }, (_, i) =>
-              text.slice(i * MAX_CHUNK, (i + 1) * MAX_CHUNK),
-            );
-
-      for (const chunk of chunks) {
+      for (const chunk of splitIntoPostChunks(text)) {
         const {
           platform: sendPlatform,
           expectedCreatorId,
@@ -1527,36 +1534,59 @@ export class RingCentralChannel implements Channel {
   ): Promise<{ jid: string; chatId: string; postId?: string }> {
     if (!this.platform) throw new Error('RC channel is not connected');
 
-    const explicitPersonId = extractPersonIdFromRef(chatRef);
-    let resolvedChat = explicitPersonId
-      ? await this.resolveConversationByMemberId(explicitPersonId)
-      : ((await this.resolveKnownChatForAgent(chatRef)) ??
-        (!this.looksLikeChatId(chatRef)
-          ? (await this.listChatsForAgent(chatRef, 1))[0]
+    const trimmedRef = chatRef.trim();
+    const explicitPersonId = extractPersonIdFromRef(trimmedRef);
+    const explicitTeamId = extractTeamIdFromRef(trimmedRef);
+    const normalizedChatRef = explicitTeamId ?? trimmedRef;
+    const resolvedKnownChat = explicitPersonId
+      ? undefined
+      : ((await this.resolveKnownChatForAgent(normalizedChatRef)) ??
+        (!this.looksLikeChatId(normalizedChatRef)
+          ? (await this.listChatsForAgent(normalizedChatRef, 1))[0]
           : undefined));
-    if (!resolvedChat && !this.looksLikeChatId(chatRef)) {
+    let resolvedChat =
+      resolvedKnownChat ??
+      (explicitPersonId
+        ? await this.resolveConversationByMemberId(explicitPersonId)
+        : !explicitTeamId && /^\d+$/.test(normalizedChatRef)
+          ? await this.resolveConversationByMemberId(normalizedChatRef)
+          : undefined);
+    if (!resolvedChat && !this.looksLikeChatId(normalizedChatRef)) {
       throw new Error(`Unable to resolve RC chat: ${chatRef}`);
     }
 
-    let chatId = this.normalizeChatId(resolvedChat?.jid ?? chatRef);
+    let chatId = this.normalizeChatId(resolvedChat?.jid ?? normalizedChatRef);
     let sendContext = await this.getSendPlatform(chatId);
     let postId: string | undefined;
 
     try {
-      postId = await sendPost(sendContext.platform, chatId, text);
+      for (const chunk of splitIntoPostChunks(text)) {
+        postId = await sendPost(sendContext.platform, chatId, chunk);
+      }
     } catch (err) {
-      if (this.looksLikeChatId(chatRef) || !isRcNotFound(err)) {
+      if (this.looksLikeChatId(normalizedChatRef) || !isRcNotFound(err)) {
+        logger.warn(
+          {
+            chatRef,
+            resolvedChatId: chatId,
+            textLength: text.length,
+            err,
+          },
+          'RC agent send failed',
+        );
         throw err;
       }
 
       const freshConversation =
-        await this.resolveConversationForPersonName(chatRef);
+        await this.resolveConversationForPersonName(normalizedChatRef);
       if (!freshConversation) throw err;
 
       resolvedChat = freshConversation;
       chatId = this.normalizeChatId(freshConversation.jid);
       sendContext = await this.getSendPlatform(chatId);
-      postId = await sendPost(sendContext.platform, chatId, text);
+      for (const chunk of splitIntoPostChunks(text)) {
+        postId = await sendPost(sendContext.platform, chatId, chunk);
+      }
     }
 
     if (postId) {

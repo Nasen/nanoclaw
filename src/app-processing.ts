@@ -23,6 +23,7 @@ export function createProcessGroupMessagesHandler(
       channels: deps.channels,
       queue: deps.queue,
       getRegisteredGroup: deps.state.getRegisteredGroup,
+      getRegisteredGroups: deps.state.getRegisteredGroups,
       getLastAgentTimestamp: deps.state.getLastAgentTimestamp,
       setLastAgentTimestamp: deps.state.setLastAgentTimestamp,
       saveState: deps.state.saveState,

@@ -176,6 +176,22 @@ export function normalizeSendToolArgsForPrompt(
   };
 }
 
+export function didDelegateToolAlreadyPostToTarget(output: string): boolean {
+  try {
+    const parsed = JSON.parse(output) as { output?: unknown };
+    if (typeof parsed.output !== 'string' || !parsed.output.trim()) {
+      return false;
+    }
+
+    const toolPayload = JSON.parse(parsed.output) as {
+      postedToTargetGroup?: unknown;
+    };
+    return toolPayload.postedToTargetGroup === true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildMcpConnectionFailureMessage(
   connectionErrors: Array<{
     serverName: string;

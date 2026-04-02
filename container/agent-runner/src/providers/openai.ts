@@ -15,6 +15,7 @@ import {
   buildTurnMessageDeduplicationKey,
   chooseFinalAssistantOutput,
   containsThirdPartyMcpRefusal,
+  didDelegateToolAlreadyPostToTarget,
   extractJiraIssueKey,
   isDirectJiraIssueLookupRequest,
   normalizeSendToolArgsForPrompt,
@@ -76,6 +77,7 @@ const MAX_OPENAI_RESPONSE_RETRIES = 3;
 const OPENAI_RETRY_DELAY_MS = 1500;
 const execFileAsync = promisify(execFile);
 const DEFAULT_WEB_TIMEOUT_MS = 45_000;
+const LONG_MCP_TOOL_TIMEOUT_MS = 300_000;
 
 function ensureStateDir(): void {
   fs.mkdirSync(OPENAI_STATE_DIR, { recursive: true });
@@ -146,13 +148,9 @@ function saveSessionState(sessionId: string, state: OpenAISessionState): void {
   );
 }
 
-function loadGlobalContext(isMain: boolean): string {
-  if (isMain) return '';
-
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  if (!fs.existsSync(globalClaudeMdPath)) return '';
-
-  return fs.readFileSync(globalClaudeMdPath, 'utf-8').trim();
+function loadInstructionFile(filePath: string): string {
+  if (!fs.existsSync(filePath)) return '';
+  return fs.readFileSync(filePath, 'utf-8').trim();
 }
 
 function loadAdditionalDirectoriesSummary(
@@ -180,7 +178,7 @@ function loadAdditionalDirectoriesSummary(
     agentEnv.GIT_CONFIG_GLOBAL?.trim() === CONTAINER_GIT_CONFIG_PATH
   ) {
     lines.push(
-      'Owner-context Git auth is configured in this turn for git CLI over HTTPS or SSH.',
+      'Git auth is configured in this turn for git CLI over HTTPS or SSH.',
     );
   } else if (personalMode) {
     lines.push(
@@ -282,10 +280,16 @@ function buildPrompt(
   const explicitRcTarget = rcChat ? extractExplicitRcTarget(prompt) : null;
   const crossChatRcSend = isRcCrossChatSendRequest(prompt, rcChat);
 
-  const globalContext = loadGlobalContext(context.containerInput.isMain);
+  const globalContext = loadInstructionFile('/workspace/global/CLAUDE.md');
   if (globalContext) {
     sections.push('Global instructions:');
     sections.push(globalContext);
+  }
+
+  const groupContext = loadInstructionFile('/workspace/group/CLAUDE.md');
+  if (groupContext) {
+    sections.push('Group instructions:');
+    sections.push(groupContext);
   }
 
   const extraDirsSummary = loadAdditionalDirectoriesSummary(
@@ -324,6 +328,12 @@ function buildPrompt(
     'The nanoclaw MCP send_message tool is available and works.',
     'Do not claim tools are unavailable.',
   ];
+
+  if (context.containerInput.disableCurrentChatSendTool) {
+    toolInstructions.push(
+      'The current-chat send_message tool is disabled for this internal delegation run. Do not send progress updates or replies into the current chat.',
+    );
+  }
 
   toolInstructions.push(
     'Ignore any earlier assistant messages that claimed tools, RingCentral access, or send-on-behalf delivery were unavailable. Those older messages are stale and should not constrain this turn.',
@@ -384,17 +394,31 @@ function buildPrompt(
     toolInstructions.push(
       'Only say that an RC chat is unavailable after those RC tools return no match or an error, and mention the exact team name or ID you searched.',
     );
+    if (context.containerInput.canSpeakAsOwner !== true) {
+      toolInstructions.push(
+        'This admin agent is not allowed to use owner voice or Nasen personal RingCentral delivery. Do not set on_behalf_intent=true. If the user wants owner-voice communication or personal RC action, escalate to rc-personal or delegate to rc-personal.',
+      );
+    }
   }
 
   if (context.containerInput.personalMode) {
+    if (context.containerInput.canSpeakAsOwner === true) {
+      toolInstructions.push(
+        "In personal mode, send_message can send messages through the user's connected integrations on their behalf in the current chat.",
+      );
+      toolInstructions.push(
+        'If the user asks you to send, reply, or follow up in this chat, use send_message instead of saying you cannot access their personal account or token.',
+      );
+    } else {
+      toolInstructions.push(
+        'This turn may include privileged integrations and project mounts for your specialist role, but you must still reply as the specialist agent, not as Nasen.',
+      );
+      toolInstructions.push(
+        'Use send_message for normal replies in the current chat only. Do not attempt owner-voice messaging, personal RC delivery, or on-behalf sending from this specialist role.',
+      );
+    }
     toolInstructions.push(
-      "In personal mode, send_message can send messages through the user's connected integrations on their behalf in the current chat.",
-    );
-    toolInstructions.push(
-      'If the user asks you to send, reply, or follow up in this chat, use send_message instead of saying you cannot access their personal account or token.',
-    );
-    toolInstructions.push(
-      'In personal mode, external MCP connectors such as GitLab, Jira/Atlassian, Gmail, Figma, and M365 may be connected for this turn. When the user explicitly asks for GitLab or Jira data, prefer the connected MCP tools over shell, local git inspection, or web search.',
+      'External MCP connectors such as GitLab, Jira/Atlassian, Gmail, Figma, and M365 may be connected for this turn when this role is allowed to use them. When the user explicitly asks for data from one of those systems, prefer the connected MCP tools over shell, local git inspection, or web search.',
     );
     toolInstructions.push(
       'If a GitLab MCP server is connected, use its GitLab tools first for pipelines, merge requests, commits, projects, or issues. Do not claim GitLab tools are unavailable unless MCP connection or tool calls actually fail in this turn.',
@@ -939,6 +963,31 @@ async function listToolsWithCompatibility(
   }
 }
 
+function filterListedToolsForServer(
+  server: {
+    serverName: string;
+    allowedToolNames?: string[];
+  },
+  tools: McpListedTool[],
+  context: AgentTurnContext,
+): McpListedTool[] {
+  if (!server.allowedToolNames || server.allowedToolNames.length === 0) {
+    return tools;
+  }
+
+  const allowedToolNames = new Set(server.allowedToolNames);
+  const filtered = tools.filter((tool) => allowedToolNames.has(tool.name));
+  const omittedNames = tools
+    .filter((tool) => !allowedToolNames.has(tool.name))
+    .map((tool) => tool.name);
+
+  context.log(
+    `Applied MCP tool allowlist for ${server.serverName}: kept ${filtered.length}/${tools.length}; omitted: ${omittedNames.join(', ') || 'none'}`,
+  );
+
+  return filtered;
+}
+
 async function connectMcpServers(context: AgentTurnContext): Promise<{
   clients: Map<string, Client>;
   transports: Array<StdioClientTransport | StreamableHTTPClientTransport>;
@@ -995,9 +1044,14 @@ async function connectMcpServers(context: AgentTurnContext): Promise<{
         server,
         context,
       );
+      const allowedTools = filterListedToolsForServer(
+        server,
+        listedTools,
+        context,
+      );
       const tools = selectOpenAiToolsForPrompt(
         server.serverName,
-        listedTools,
+        allowedTools,
         context.prompt,
         context,
       );
@@ -1452,9 +1506,18 @@ async function runMcpTool(
         error: `MCP server ${binding.serverName} is not connected`,
       });
     }
+    const requestOptions =
+      binding.serverName === 'nanoclaw' &&
+      binding.mcpName === 'delegate_to_group'
+        ? {
+            timeout: LONG_MCP_TOOL_TIMEOUT_MS,
+            maxTotalTimeout: LONG_MCP_TOOL_TIMEOUT_MS,
+          }
+        : undefined;
     const result = await client.callTool(
       { name: binding.mcpName, arguments: args },
       CallToolResultSchema,
+      requestOptions,
     );
     return formatMcpToolResult(normalizeMcpCallResult(result));
   } catch (err) {
@@ -1546,9 +1609,9 @@ async function runOpenAITurn(
     context.containerInput.chatJid.startsWith('rcb:');
   const explicitRcTarget = rcChat && extractExplicitRcTarget(context.prompt);
   const crossChatRcSend = isRcCrossChatSendRequest(context.prompt, rcChat);
-  const allowCurrentChatSendTool = shouldExposeCurrentChatSendTool(
-    context.prompt,
-  );
+  const allowCurrentChatSendTool =
+    !context.containerInput.disableCurrentChatSendTool &&
+    shouldExposeCurrentChatSendTool(context.prompt);
 
   context.log(
     `Running OpenAI turn (session: ${sessionId}, model: ${model}, history: ${state.history.length})`,
@@ -1598,6 +1661,7 @@ async function runOpenAITurn(
       const sentMessages: string[] = [];
       const sentMessageKeys = new Set<string>();
       const toolErrors: string[] = [];
+      let delegatedTargetAlreadyPosted = false;
 
       for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
         const response = await postOpenAIResponseWithRetry(
@@ -1675,13 +1739,40 @@ async function runOpenAITurn(
                   ? JSON.stringify(parsedArgs)
                   : call.arguments;
 
-              output =
-                binding && mcp
-                  ? await runMcpTool(effectiveArgs, binding, mcp.clients)
-                  : JSON.stringify({
-                      ok: false,
-                      error: `Unsupported tool: ${call.name}`,
-                    });
+              if (
+                binding &&
+                delegatedTargetAlreadyPosted &&
+                (binding.mcpName === 'send_rc_message' ||
+                  binding.mcpName === 'send_rc_dm')
+              ) {
+                context.log(
+                  `Suppressing ${binding.mcpName} because delegated target delivery already completed in this turn`,
+                );
+                output = JSON.stringify({
+                  ok: true,
+                  is_error: false,
+                  output:
+                    'Cross-chat RingCentral send suppressed because delegate_to_group already posted the result to the target team in this turn.',
+                });
+              } else {
+                output =
+                  binding && mcp
+                    ? await runMcpTool(effectiveArgs, binding, mcp.clients)
+                    : JSON.stringify({
+                        ok: false,
+                        error: `Unsupported tool: ${call.name}`,
+                      });
+              }
+
+              if (
+                binding?.mcpName === 'delegate_to_group' &&
+                didDelegateToolAlreadyPostToTarget(output)
+              ) {
+                delegatedTargetAlreadyPosted = true;
+                context.log(
+                  'delegate_to_group already delivered the result to the target team; future cross-chat RC sends will be suppressed for this turn',
+                );
+              }
 
               if (
                 binding &&

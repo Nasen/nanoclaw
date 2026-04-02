@@ -5,6 +5,14 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   personalMode?: boolean;
+  adminRole?: string;
+  canSpeakAsOwner?: boolean;
+  allowedExternalMcpCapabilities?: Array<
+    'gmail' | 'jira' | 'testit' | 'figma' | 'gitlab' | 'm365'
+  >;
+  allowedNanoclawTools?: string[];
+  allowedPeerGroups?: string[];
+  disableCurrentChatSendTool?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;

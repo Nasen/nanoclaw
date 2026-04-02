@@ -2,6 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 
+import {
+  canAdminAgentDelegate,
+  canAdminAgentSpeakAsOwner,
+  getAdminAgentProfile,
+  hasAdminAgentToolAccess,
+  NanoclawToolName,
+} from './admin-agents.js';
 import { GROUPS_DIR, TIMEZONE } from './config.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isPersonalFolder } from './rc-auto-register.js';
@@ -14,6 +21,7 @@ import {
   NotebookLmNotebook,
   NotebookLmSourceInput,
 } from './notebooklm.js';
+import { AvailableGroup } from './container-contract.js';
 import {
   RcContactInput,
   RcPresenceUpdateInput,
@@ -51,6 +59,8 @@ export interface TaskIpcData {
   pageSize?: number;
   sources?: NotebookLmSourceInput[];
   onBehalfIntent?: boolean;
+  targetGroupFolder?: string;
+  context?: string;
 }
 
 export interface TaskIpcDeps {
@@ -123,6 +133,16 @@ export interface TaskIpcDeps {
     sourceGroup: string,
     isMain: boolean,
   ) => Promise<NotebookLmAddSourcesResult>;
+  delegateToGroup: (params: {
+    sourceGroupFolder: string;
+    targetGroupFolder: string;
+    prompt: string;
+    context?: string;
+  }) => Promise<{
+    result: string | null;
+    targetRole: string | null;
+    postedToTargetGroup?: boolean;
+  }>;
 }
 
 const RC_IPC_TIMEOUT_MS = 15_000;
@@ -163,7 +183,31 @@ function isTaskAuthorized(
 }
 
 function hasRcAccess(sourceGroup: string, isMain: boolean): boolean {
-  return isMain || isPersonalFolder(sourceGroup, GROUPS_DIR);
+  const profile = getAdminAgentProfile(sourceGroup);
+  if (!profile) {
+    return isMain || isPersonalFolder(sourceGroup, GROUPS_DIR);
+  }
+
+  return (
+    hasAdminAgentToolAccess(sourceGroup, 'list_rc_chats') ||
+    hasAdminAgentToolAccess(sourceGroup, 'read_rc_messages') ||
+    hasAdminAgentToolAccess(sourceGroup, 'send_rc_message') ||
+    hasAdminAgentToolAccess(sourceGroup, 'send_rc_dm')
+  );
+}
+
+function hasToolAccess(
+  sourceGroup: string,
+  tool: NanoclawToolName,
+  fallbackAllowed: boolean,
+): boolean {
+  const profile = getAdminAgentProfile(sourceGroup);
+  if (!profile) return fallbackAllowed;
+  return hasAdminAgentToolAccess(sourceGroup, tool);
+}
+
+function hasGuardedOwnerVoiceAccess(sourceGroup: string): boolean {
+  return canAdminAgentSpeakAsOwner(sourceGroup);
 }
 
 function resolveRcMode(
@@ -383,7 +427,7 @@ export async function processTaskIpc(
     }
 
     case 'refresh_groups':
-      if (!isMain) {
+      if (!hasToolAccess(sourceGroup, 'register_group', isMain)) {
         logger.warn(
           { sourceGroup },
           'Unauthorized refresh_groups attempt blocked',
@@ -401,7 +445,7 @@ export async function processTaskIpc(
       break;
 
     case 'register_group':
-      if (!isMain) {
+      if (!hasToolAccess(sourceGroup, 'register_group', isMain)) {
         logger.warn(
           { sourceGroup },
           'Unauthorized register_group attempt blocked',
@@ -432,9 +476,70 @@ export async function processTaskIpc(
       });
       break;
 
+    case 'delegate_to_group': {
+      if (!data.targetGroupFolder || !data.prompt) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'targetGroupFolder and prompt are required.',
+        });
+        break;
+      }
+      if (
+        !hasToolAccess(sourceGroup, 'delegate_to_group', false) ||
+        !canAdminAgentDelegate(sourceGroup, data.targetGroupFolder)
+      ) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: `Delegation from ${sourceGroup} to ${data.targetGroupFolder} is not allowed.`,
+        });
+        break;
+      }
+      logger.info(
+        {
+          sourceGroup,
+          targetGroup: data.targetGroupFolder,
+          promptLength: data.prompt.length,
+          contextLength: data.context?.length ?? 0,
+        },
+        'IPC delegation request accepted',
+      );
+      try {
+        const result = await deps.delegateToGroup({
+          sourceGroupFolder: sourceGroup,
+          targetGroupFolder: data.targetGroupFolder,
+          prompt: data.prompt,
+          context: data.context,
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          targetGroup: data.targetGroupFolder,
+          targetRole: result.targetRole,
+          result: result.result,
+          postedToTargetGroup: result.postedToTargetGroup === true,
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            sourceGroup,
+            targetGroup: data.targetGroupFolder,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          'IPC delegation request failed',
+        );
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
     case 'rc_list_chats': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode);
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'list_rc_chats', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -460,7 +565,10 @@ export async function processTaskIpc(
     case 'rc_read_messages': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode);
       const chatRef = data.chatId || data.chatJid;
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'read_rc_messages', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -495,7 +603,14 @@ export async function processTaskIpc(
 
     case 'rc_send_message': {
       const chatRef = data.chatId || data.chatJid;
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      const deliveryDecision = resolveCrossChatRcDelivery({
+        requestedMode: data.mode,
+        onBehalfIntent: data.onBehalfIntent === true,
+      });
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'send_rc_message', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -509,10 +624,16 @@ export async function processTaskIpc(
         });
         break;
       }
-      const deliveryDecision = resolveCrossChatRcDelivery({
-        requestedMode: data.mode,
-        onBehalfIntent: data.onBehalfIntent === true,
-      });
+      if (
+        deliveryDecision.mode === 'personal' &&
+        !hasGuardedOwnerVoiceAccess(sourceGroup)
+      ) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'Owner-voice RingCentral sending is restricted to rc-personal.',
+        });
+        break;
+      }
       const outboundText =
         deliveryDecision.mode === 'personal'
           ? formatOnBehalfAssistantMessage(data.text)
@@ -550,7 +671,10 @@ export async function processTaskIpc(
     case 'rc_list_chat_members': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode);
       const chatRef = data.chatId || data.chatJid;
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'list_rc_chat_members', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -585,7 +709,10 @@ export async function processTaskIpc(
 
     case 'rc_get_presence': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'get_rc_presence', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -613,7 +740,10 @@ export async function processTaskIpc(
 
     case 'rc_set_presence': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'set_rc_presence', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -651,7 +781,10 @@ export async function processTaskIpc(
 
     case 'rc_get_extension': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'get_rc_extension', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -679,7 +812,10 @@ export async function processTaskIpc(
 
     case 'rc_list_extensions': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'list_rc_extensions', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -707,7 +843,10 @@ export async function processTaskIpc(
 
     case 'rc_list_contacts': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'list_rc_contacts', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -735,7 +874,10 @@ export async function processTaskIpc(
 
     case 'rc_create_contact': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'create_rc_contact', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -770,7 +912,10 @@ export async function processTaskIpc(
 
     case 'rc_list_phone_numbers': {
       const mode = resolveRcLookupMode(sourceGroup, data.mode, 'personal');
-      if (!hasRcAccess(sourceGroup, isMain)) {
+      if (
+        !hasRcAccess(sourceGroup, isMain) ||
+        !hasToolAccess(sourceGroup, 'list_rc_phone_numbers', isMain)
+      ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'RC tools are only available from main or personal groups.',
@@ -797,6 +942,15 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_list_notebooks': {
+      if (
+        !hasToolAccess(sourceGroup, 'list_notebooklm_notebooks', isMain)
+      ) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'NotebookLM tools are restricted in this group.',
+        });
+        break;
+      }
       try {
         const notebooks = await deps.notebookLmListNotebooks(data.pageSize);
         writeTaskResponse(sourceGroup, data.requestId, {
@@ -813,6 +967,15 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_create_notebook': {
+      if (
+        !hasToolAccess(sourceGroup, 'create_notebooklm_notebook', isMain)
+      ) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'NotebookLM tools are restricted in this group.',
+        });
+        break;
+      }
       if (!data.title) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
@@ -836,6 +999,13 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_get_notebook': {
+      if (!hasToolAccess(sourceGroup, 'get_notebooklm_notebook', isMain)) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'NotebookLM tools are restricted in this group.',
+        });
+        break;
+      }
       if (!data.notebookId) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
@@ -859,6 +1029,13 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_add_sources': {
+      if (!hasToolAccess(sourceGroup, 'add_notebooklm_sources', isMain)) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'NotebookLM tools are restricted in this group.',
+        });
+        break;
+      }
       if (!data.notebookId || !data.sources?.length) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
@@ -889,4 +1066,3 @@ export async function processTaskIpc(
       logger.warn({ type: data.type }, 'Unknown IPC task type');
   }
 }
-import { AvailableGroup } from './container-contract.js';

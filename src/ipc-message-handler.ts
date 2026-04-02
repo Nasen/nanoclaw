@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { canAdminAgentSpeakAsOwner, getAdminAgentProfile } from './admin-agents.js';
 import { logger } from './logger.js';
 import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import {
@@ -50,24 +51,38 @@ export async function processMessageFiles(
             requestedMode: data.deliveryMode,
             onBehalfIntent: data.onBehalfIntent === true,
           });
+          const adminProfile = getAdminAgentProfile(sourceGroup);
+          const ownerVoiceAllowed =
+            !adminProfile || canAdminAgentSpeakAsOwner(sourceGroup);
+          const deliveryMode =
+            deliveryDecision.mode === 'personal' && !ownerVoiceAllowed
+              ? 'bot'
+              : deliveryDecision.mode;
           const outboundText =
             isRingCentralChatJid(data.chatJid) &&
-            deliveryDecision.mode === 'personal'
+            deliveryMode === 'personal'
               ? formatOnBehalfAssistantMessage(data.text)
               : data.text;
+          if (deliveryDecision.mode === 'personal' && deliveryMode !== 'personal') {
+            logger.warn(
+              { chatJid: data.chatJid, sourceGroup },
+              'Downgrading unauthorized owner-voice IPC message to bot delivery',
+            );
+          }
           await deps.sendMessage(
             data.chatJid,
             outboundText,
-            deliveryDecision.mode,
+            deliveryMode,
           );
           logger.info(
             {
               chatJid: data.chatJid,
               sourceGroup,
               requestedMode: data.deliveryMode || 'auto',
-              deliveryMode: deliveryDecision.mode,
+              deliveryMode,
               onBehalfIntent: data.onBehalfIntent === true,
-              policyForced: deliveryDecision.policyForced,
+              policyForced:
+                deliveryDecision.policyForced || deliveryMode !== deliveryDecision.mode,
             },
             'IPC message sent',
           );

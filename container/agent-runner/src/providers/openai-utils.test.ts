@@ -6,6 +6,7 @@ import {
   chooseFinalAssistantOutput,
   containsLegacyToolRefusal,
   containsThirdPartyMcpRefusal,
+  didDelegateToolAlreadyPostToTarget,
   extractJiraIssueKey,
   hasExplicitOnBehalfRequest,
   isDirectJiraIssueLookupRequest,
@@ -191,5 +192,23 @@ describe('openai-utils', () => {
         'Send this to the Video team.',
       ),
     ).toEqual(args);
+  });
+
+  it('detects host-posted delegation completion from tool output', () => {
+    expect(
+      didDelegateToolAlreadyPostToTarget(
+        JSON.stringify({
+          ok: true,
+          is_error: false,
+          output: JSON.stringify({
+            targetGroup: 'rc-grp-nanoclaw-gitops',
+            targetRole: 'gitops',
+            result:
+              'The delegated result has already been posted in NanoClaw-GitOps.',
+            postedToTargetGroup: true,
+          }),
+        }),
+      ),
+    ).toBe(true);
   });
 });

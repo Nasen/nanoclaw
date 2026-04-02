@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const {
   mockReadEnvFile,
   mockGetAgentBackendConfig,
+  mockGetAdminAgentProfile,
   mockIsMainFolder,
   mockIsPersonalFolder,
   mockValidateAdditionalMounts,
@@ -17,6 +18,69 @@ const {
     containerCredentialEnvVar: 'OPENAI_API_KEY' as const,
     authMode: 'api-key' as const,
   })),
+  mockGetAdminAgentProfile: vi.fn((folder: string) => {
+    if (folder === 'rc-personal') {
+      return {
+        role: 'supervisor',
+        mountProfile: 'supervisor',
+        allowedPeers: [],
+        canSpeakAsOwner: true,
+        nanoclawTools: [],
+        externalMcpCapabilities: [],
+        envKeys: ['JIRA_TOKEN', 'GITLAB_PERSONAL_ACCESS_TOKEN'],
+        mountGmailTokens: true,
+        mountOutlookTokens: true,
+        mountFigmaMcp: true,
+        allowGitAuth: true,
+      };
+    }
+    if (folder === 'rc-grp-nanoclaw-gitops') {
+      return {
+        role: 'gitops',
+        mountProfile: 'projects-readwrite',
+        allowedPeers: ['rc-personal'],
+        canSpeakAsOwner: false,
+        nanoclawTools: [],
+        externalMcpCapabilities: ['gitlab'],
+        envKeys: ['GITLAB_PERSONAL_ACCESS_TOKEN'],
+        mountGmailTokens: false,
+        mountOutlookTokens: false,
+        mountFigmaMcp: false,
+        allowGitAuth: true,
+      };
+    }
+    if (folder === 'rc-grp-nanoclaw-test-design') {
+      return {
+        role: 'testdesign',
+        mountProfile: 'projects-readonly',
+        allowedPeers: ['rc-personal'],
+        canSpeakAsOwner: false,
+        nanoclawTools: [],
+        externalMcpCapabilities: ['jira'],
+        envKeys: ['JIRA_TOKEN'],
+        mountGmailTokens: false,
+        mountOutlookTokens: false,
+        mountFigmaMcp: false,
+        allowGitAuth: false,
+      };
+    }
+    if (folder === 'rc-grp-nanoclaw-peopleops') {
+      return {
+        role: 'peopleops',
+        mountProfile: 'none',
+        allowedPeers: ['rc-personal'],
+        canSpeakAsOwner: false,
+        nanoclawTools: [],
+        externalMcpCapabilities: ['gmail', 'm365'],
+        envKeys: ['MS_TENANT_ID'],
+        mountGmailTokens: true,
+        mountOutlookTokens: true,
+        mountFigmaMcp: false,
+        allowGitAuth: false,
+      };
+    }
+    return null;
+  }),
   mockIsMainFolder: vi.fn(() => false),
   mockIsPersonalFolder: vi.fn(() => false),
   mockValidateAdditionalMounts: vi.fn(() => []),
@@ -25,6 +89,10 @@ const {
 
 vi.mock('./agent-backend.js', () => ({
   getAgentBackendConfig: mockGetAgentBackendConfig,
+}));
+
+vi.mock('./admin-agents.js', () => ({
+  getAdminAgentProfile: mockGetAdminAgentProfile,
 }));
 
 vi.mock('./container-runtime.js', () => ({
@@ -99,6 +167,7 @@ describe('buildContainerArgs', () => {
   beforeEach(() => {
     mockReadEnvFile.mockReset();
     mockGetAgentBackendConfig.mockClear();
+    mockGetAdminAgentProfile.mockClear();
     mockIsMainFolder.mockReset();
     mockIsPersonalFolder.mockReset();
     mockValidateAdditionalMounts.mockReset();
@@ -189,6 +258,27 @@ describe('buildContainerArgs', () => {
     });
   });
 
+  it('creates both Claude settings files for group session state', () => {
+    buildVolumeMounts(
+      {
+        name: 'Main Group',
+        folder: 'main',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      },
+      true,
+    );
+
+    expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+      '/tmp/nanoclaw-test-data/sessions/main/.claude/settings.json',
+      expect.stringContaining('"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"'),
+    );
+    expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+      '/tmp/nanoclaw-test-data/sessions/main/.claude/remote-settings.json',
+      '{}\n',
+    );
+  });
+
   it('does not mount git auth for non-owner groups', () => {
     const mounts = buildVolumeMounts(
       {
@@ -226,9 +316,6 @@ describe('buildContainerArgs', () => {
   });
 
   it('inherits rc-personal additional mounts for main folders', () => {
-    mockIsMainFolder.mockImplementation(
-      ((folder: string) => folder === 'rc-grp-nanoclaw-gitops') as any,
-    );
     mockGetAllRegisteredGroups.mockReturnValue({
       'rcb:157530931206': {
         name: 'NanoClaw-Personal',
@@ -271,9 +358,6 @@ describe('buildContainerArgs', () => {
   });
 
   it('lets group-specific additional mounts override inherited rc-personal mounts', () => {
-    mockIsMainFolder.mockImplementation(
-      ((folder: string) => folder === 'rc-grp-nanoclaw-gitops') as any,
-    );
     mockGetAllRegisteredGroups.mockReturnValue({
       'rcb:157530931206': {
         name: 'NanoClaw-Personal',
@@ -323,13 +407,50 @@ describe('buildContainerArgs', () => {
           containerPath: 'projects',
           readonly: true,
         },
+      ],
+      'NanoClaw-GitOps',
+      true,
+    );
+  });
+
+  it('mounts inherited supervisor projects as readonly for readonly specialist roles', () => {
+    mockGetAllRegisteredGroups.mockReturnValue({
+      'rcb:157530931206': {
+        name: 'NanoClaw-Personal',
+        folder: 'rc-personal',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+        containerConfig: {
+          additionalMounts: [
+            {
+              hostPath: '/Users/nasen.you/Projects',
+              containerPath: 'projects',
+              readonly: false,
+            },
+          ],
+        },
+      },
+    });
+
+    buildVolumeMounts(
+      {
+        name: 'NanoClaw-TestDesign',
+        folder: 'rc-grp-nanoclaw-test-design',
+        trigger: '@Bob',
+        added_at: '2026-03-30T00:00:00.000Z',
+      },
+      true,
+    );
+
+    expect(mockValidateAdditionalMounts).toHaveBeenCalledWith(
+      [
         {
-          hostPath: '/Users/nasen.you/Shared',
-          containerPath: 'shared',
+          hostPath: '/Users/nasen.you/Projects',
+          containerPath: 'projects',
           readonly: true,
         },
       ],
-      'NanoClaw-GitOps',
+      'NanoClaw-TestDesign',
       true,
     );
   });
@@ -355,12 +476,12 @@ describe('buildContainerArgs', () => {
 
     buildVolumeMounts(
       {
-        name: 'External Group',
-        folder: 'external-group',
+        name: 'NanoClaw-PeopleOps',
+        folder: 'rc-grp-nanoclaw-peopleops',
         trigger: '@Andy',
         added_at: new Date().toISOString(),
       },
-      false,
+      true,
     );
 
     expect(mockValidateAdditionalMounts).not.toHaveBeenCalled();

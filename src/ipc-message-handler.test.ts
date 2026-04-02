@@ -125,4 +125,35 @@ describe('processMessageFiles', () => {
       'personal',
     );
   });
+
+  it('downgrades specialist admin personal delivery to bot delivery', async () => {
+    fs.writeFileSync(
+      path.join(messagesDir, 'msg-4.json'),
+      JSON.stringify({
+        type: 'message',
+        chatJid: 'rc:777',
+        text: 'hello',
+        deliveryMode: 'personal',
+        onBehalfIntent: true,
+      }),
+    );
+
+    const sendMessage = vi.fn(async () => {});
+
+    await processMessageFiles(
+      messagesDir,
+      'rc-grp-nanoclaw-gitops',
+      true,
+      {
+        'rc:777': {
+          ...MAIN_GROUP,
+          folder: 'rc-grp-nanoclaw-gitops',
+        },
+      },
+      { sendMessage },
+      errorDir,
+    );
+
+    expect(sendMessage).toHaveBeenCalledWith('rc:777', 'hello', 'bot');
+  });
 });

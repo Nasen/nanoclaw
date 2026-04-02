@@ -3,6 +3,14 @@ export const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 export type ContainerLifecycle = 'query_started' | 'idle_waiting';
 
+export type ExternalMcpCapability =
+  | 'gmail'
+  | 'jira'
+  | 'testit'
+  | 'figma'
+  | 'gitlab'
+  | 'm365';
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -10,6 +18,12 @@ export interface ContainerInput {
   chatJid: string;
   isMain: boolean;
   personalMode?: boolean;
+  adminRole?: string;
+  canSpeakAsOwner?: boolean;
+  allowedExternalMcpCapabilities?: ExternalMcpCapability[];
+  allowedNanoclawTools?: string[];
+  allowedPeerGroups?: string[];
+  disableCurrentChatSendTool?: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;

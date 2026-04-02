@@ -9,13 +9,15 @@ import {
 
 import { AgentProvider, AgentTurnContext, AgentTurnResult } from '../types.js';
 import {
-  getClaudeAllowedToolPatterns,
+  getClaudeAllowedToolPatternsForContext,
   getClaudeMcpServers,
 } from './mcp-registry.js';
 
 const IPC_POLL_MS = 500;
 const CONTAINER_GIT_CONFIG_PATH =
   '/home/node/.config/nanoclaw/git-auth/gitconfig';
+const CLAUDE_HOME = '/home/node/.claude';
+const REMOTE_SETTINGS_PATH = path.join(CLAUDE_HOME, 'remote-settings.json');
 
 interface SessionEntry {
   sessionId: string;
@@ -243,14 +245,14 @@ function createPreCompactHook(
 }
 
 function loadGlobalPrompt(
-  isMain: boolean,
+  _isMain: boolean,
   log: (message: string) => void,
   personalMode: boolean,
   agentEnv: Record<string, string | undefined>,
 ): { globalClaudeMd?: string; extraDirs: string[]; runtimeContext?: string } {
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
-  if (!isMain && fs.existsSync(globalClaudeMdPath)) {
+  if (fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
   }
 
@@ -281,7 +283,7 @@ function loadGlobalPrompt(
       agentEnv.GIT_CONFIG_GLOBAL?.trim() === CONTAINER_GIT_CONFIG_PATH
     ) {
       lines.push(
-        'Owner-context Git auth is configured in this turn for git CLI over HTTPS or SSH.',
+        'Git auth is configured in this turn for git CLI over HTTPS or SSH.',
       );
     } else if (personalMode) {
       lines.push(
@@ -297,6 +299,15 @@ function loadGlobalPrompt(
   }
 
   return { globalClaudeMd, extraDirs, runtimeContext };
+}
+
+function ensureClaudeRuntimeState(log: (message: string) => void): void {
+  fs.mkdirSync(CLAUDE_HOME, { recursive: true });
+
+  if (!fs.existsSync(REMOTE_SETTINGS_PATH)) {
+    fs.writeFileSync(REMOTE_SETTINGS_PATH, '{}\n');
+    log(`Created missing Claude runtime file: ${REMOTE_SETTINGS_PATH}`);
+  }
 }
 
 async function runClaudeTurn(
@@ -340,6 +351,8 @@ async function runClaudeTurn(
   let messageCount = 0;
   let resultCount = 0;
 
+  ensureClaudeRuntimeState(log);
+
   const { globalClaudeMd, extraDirs, runtimeContext } = loadGlobalPrompt(
     containerInput.isMain,
     log,
@@ -382,7 +395,7 @@ async function runClaudeTurn(
         'ToolSearch',
         'Skill',
         'NotebookEdit',
-        ...getClaudeAllowedToolPatterns(!!containerInput.personalMode),
+        ...getClaudeAllowedToolPatternsForContext(context),
       ],
       env: agentEnv,
       permissionMode: 'bypassPermissions',

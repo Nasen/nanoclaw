@@ -843,6 +843,165 @@ describe('RingCentralChannel.sendMessageForAgent', () => {
       { text: 'hi' },
     );
   });
+
+  it('sends to a team mention without trying to create a DM conversation', async () => {
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      post: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/158812848134/posts') {
+          return {
+            json: async () => ({
+              id: 'post-team-123',
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/158812848134') {
+          return {
+            json: async () => ({
+              id: '158812848134',
+              name: 'NanoClaw-GitOps',
+              type: 'Team',
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/158812848134/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-team-123',
+                  creatorId: '860412020',
+                  text: 'hi',
+                  creationTime: '2026-03-31T06:00:00.000Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected get path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(
+      channel.sendMessageForAgent('![:Team](158812848134)', 'hi'),
+    ).resolves.toMatchObject({
+      jid: 'rc:158812848134',
+      chatId: '158812848134',
+      postId: 'post-team-123',
+    });
+
+    expect(platform.post).not.toHaveBeenCalledWith(
+      '/team-messaging/v1/conversations',
+      expect.anything(),
+    );
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/158812848134/posts',
+      { text: 'hi' },
+    );
+  });
+
+  it('chunks oversized agent sends across multiple RC posts', async () => {
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    let postCount = 0;
+    const platform = {
+      post: vi.fn(async (path: string, body?: { text?: string }) => {
+        if (path === '/team-messaging/v1/chats/158812848134/posts') {
+          postCount += 1;
+          return {
+            json: async () => ({
+              id: `post-team-${postCount}`,
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+      get: vi.fn(async (path: string) => {
+        if (path === '/team-messaging/v1/chats/158812848134') {
+          return {
+            json: async () => ({
+              id: '158812848134',
+              name: 'NanoClaw-GitOps',
+              type: 'Team',
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/158812848134/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-team-2',
+                  creatorId: '860412020',
+                  text: 'tail',
+                  creationTime: '2026-03-31T06:00:00.000Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected get path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    const longText = 'x'.repeat(4500);
+    await expect(
+      channel.sendMessageForAgent('![:Team](158812848134)', longText),
+    ).resolves.toMatchObject({
+      jid: 'rc:158812848134',
+      chatId: '158812848134',
+      postId: 'post-team-2',
+    });
+
+    expect(platform.post).toHaveBeenNthCalledWith(
+      1,
+      '/team-messaging/v1/chats/158812848134/posts',
+      { text: 'x'.repeat(4000) },
+    );
+    expect(platform.post).toHaveBeenNthCalledWith(
+      2,
+      '/team-messaging/v1/chats/158812848134/posts',
+      { text: 'x'.repeat(500) },
+    );
+  });
 });
 
 describe('RingCentralChannel sent post tracking', () => {

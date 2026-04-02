@@ -1,4 +1,13 @@
 import { runContainerAgent } from './container-runner.js';
+import {
+  delegateToAdminGroup,
+  resolveDelegationDelivery,
+} from './admin-delegation.js';
+import {
+  getAdminAgentProfile,
+  getAdminAgentPromptHeader,
+  isSupervisorGroup,
+} from './admin-agents.js';
 import { ContainerOutput } from './container-contract.js';
 import {
   writeGroupsSnapshot,
@@ -18,6 +27,10 @@ import {
   handleReservedSlashCommand,
   hasAllowedStandaloneSlashCommand,
 } from './slash-commands.js';
+import {
+  buildSupervisorRoutingPromptPrefix,
+  resolveSupervisorRoute,
+} from './supervisor-routing.js';
 import { RegisteredGroup } from './types.js';
 import { GroupQueue } from './group-queue.js';
 
@@ -44,6 +57,7 @@ export async function runGroupAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = isMainGroup(group);
+  const adminProfile = getAdminAgentProfile(group.folder);
 
   const tasks = getAllTasks();
   writeTasksSnapshot(
@@ -77,12 +91,18 @@ export async function runGroupAgent(
     const output = await runContainerAgent(
       group,
       {
-        prompt,
+        prompt: `${getAdminAgentPromptHeader(group)}${prompt}`,
         sessionId: getSession(group.folder),
         groupFolder: group.folder,
         chatJid,
         isMain,
         personalMode: isPersonalModeGroup(group),
+        adminRole: adminProfile?.role,
+        canSpeakAsOwner: adminProfile?.canSpeakAsOwner,
+        allowedExternalMcpCapabilities:
+          adminProfile?.externalMcpCapabilities ?? [],
+        allowedNanoclawTools: adminProfile?.nanoclawTools ?? [],
+        allowedPeerGroups: adminProfile?.allowedPeers ?? [],
       },
       (proc, containerName) =>
         deps.queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -108,9 +128,107 @@ export async function runGroupAgent(
   }
 }
 
+async function tryAutoDelegateSupervisorTurn(params: {
+  group: RegisteredGroup;
+  chatJid: string;
+  prompt: string;
+  routingDecision: ReturnType<typeof resolveSupervisorRoute>;
+  queue: GroupQueue;
+  channels: import('./types.js').Channel[];
+  getAvailableGroups: () => AvailableGroup[];
+  getRegisteredGroups: () => Record<string, RegisteredGroup>;
+}): Promise<
+  | { status: 'delegated' }
+  | { status: 'fallback'; reason: string }
+> {
+  if (
+    params.routingDecision.mode !== 'delegate' ||
+    !params.routingDecision.targetGroupFolder
+  ) {
+    return {
+      status: 'fallback',
+      reason: params.routingDecision.reason,
+    };
+  }
+
+  const registeredGroups = params.getRegisteredGroups();
+  const targetEntry = Object.entries(registeredGroups).find(
+    ([, group]) => group.folder === params.routingDecision.targetGroupFolder,
+  );
+  if (!targetEntry) {
+    return {
+      status: 'fallback',
+      reason: `Target group ${params.routingDecision.targetGroupFolder} is not registered.`,
+    };
+  }
+
+  const [targetGroupJid, targetGroup] = targetEntry;
+
+  try {
+    const delegated = await delegateToAdminGroup({
+      sourceGroupFolder: params.group.folder,
+      targetGroupJid,
+      targetGroup,
+      queue: params.queue,
+      getAvailableGroups: params.getAvailableGroups,
+      getRegisteredGroups: params.getRegisteredGroups,
+      prompt: params.prompt,
+    });
+    const delivery = resolveDelegationDelivery({
+      sourceGroupFolder: params.group.folder,
+      sourceGroupName: params.group.name,
+      targetGroupName: targetGroup.name,
+      prompt: params.prompt,
+      result: delegated.result,
+    });
+
+    if (delivery.postToTargetChat && delivery.targetChatText) {
+      const { resolveOutboundTarget } = await import('./router.js');
+      const target = resolveOutboundTarget(params.channels, targetGroupJid, 'bot');
+      if (!target) {
+        throw new Error(`No outbound channel for ${targetGroupJid}`);
+      }
+      await target.channel.sendMessage(target.jid, delivery.targetChatText);
+    }
+
+    if (delivery.callerResult) {
+      const { resolveOutboundTarget } = await import('./router.js');
+      const sourceTarget = resolveOutboundTarget(
+        params.channels,
+        params.chatJid,
+        'bot',
+      );
+      if (!sourceTarget) {
+        throw new Error(`No outbound channel for ${params.chatJid}`);
+      }
+      await sourceTarget.channel.sendMessage(
+        sourceTarget.jid,
+        delivery.callerResult,
+      );
+    }
+
+    return { status: 'delegated' };
+  } catch (err) {
+    logger.warn(
+      {
+        group: params.group.name,
+        targetGroup: params.routingDecision.targetGroupFolder,
+        err,
+      },
+      'Supervisor auto-delegation failed, falling back to direct handling',
+    );
+    return {
+      status: 'fallback',
+      reason:
+        err instanceof Error ? err.message : 'Supervisor auto-delegation failed.',
+    };
+  }
+}
+
 interface ProcessGroupMessagesDeps extends RunGroupAgentDeps {
   channels: import('./types.js').Channel[];
   getRegisteredGroup: (chatJid: string) => RegisteredGroup | undefined;
+  getRegisteredGroups: () => Record<string, RegisteredGroup>;
   getLastAgentTimestamp: (chatJid: string) => string;
   setLastAgentTimestamp: (chatJid: string, timestamp: string) => void;
   saveState: () => void;
@@ -181,6 +299,42 @@ export async function processGroupMessages(
     personalRcDm,
     autoAssistEnabled: deps.autoAssistEnabled(),
   });
+  const routingPromptText = missedMessages.map((message) => message.content).join('\n');
+  const registeredGroups = deps.getRegisteredGroups();
+  const supervisorRoute = isSupervisorGroup(group.folder)
+    ? resolveSupervisorRoute({
+        group,
+        prompt: routingPromptText,
+        registeredGroups,
+      })
+    : null;
+  const effectivePrompt =
+    supervisorRoute?.mode === 'collaborate'
+      ? `${buildSupervisorRoutingPromptPrefix({
+          decision: supervisorRoute,
+          registeredGroups,
+        })}${prompt}`
+      : prompt;
+
+  if (supervisorRoute) {
+    logger.info(
+      {
+        group: group.name,
+        mode: supervisorRoute.mode,
+        confidence: supervisorRoute.confidence,
+        targetGroupFolder: supervisorRoute.targetGroupFolder,
+        topScores: supervisorRoute.scoreBreakdown
+          .slice(0, 3)
+          .map((entry) => ({
+            role: entry.role,
+            score: entry.score,
+            targetGroupFolder: entry.targetGroupFolder,
+          })),
+        reason: supervisorRoute.reason,
+      },
+      'Supervisor route decision',
+    );
+  }
 
   if (turnInput.slashCommand) {
     const handled = await handleReservedSlashCommand({
@@ -213,12 +367,34 @@ export async function processGroupMessages(
   );
 
   await channel.setTyping?.(chatJid, true);
+
+  if (
+    supervisorRoute?.mode === 'delegate' &&
+    supervisorRoute.targetGroupFolder
+  ) {
+    const delegated = await tryAutoDelegateSupervisorTurn({
+      group,
+      chatJid,
+      prompt: routingPromptText,
+      routingDecision: supervisorRoute,
+      queue: deps.queue,
+      channels: deps.channels,
+      getAvailableGroups: deps.getAvailableGroups,
+      getRegisteredGroups: deps.getRegisteredGroups,
+    });
+    await channel.setTyping?.(chatJid, false);
+
+    if (delegated.status === 'delegated') {
+      return true;
+    }
+  }
+
   let hadError = false;
   let outputSentToUser = false;
 
   const output = await runGroupAgent(
     group,
-    prompt,
+    effectivePrompt,
     chatJid,
     deps,
     async (result) => {

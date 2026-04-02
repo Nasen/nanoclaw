@@ -6,6 +6,7 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { getAdminAgentProfile } from './admin-agents.js';
 import { CONTAINER_MAX_OUTPUT_SIZE } from './config.js';
 import { buildContainerArgs, buildVolumeMounts } from './container-config.js';
 import {
@@ -32,12 +33,14 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const mounts = buildVolumeMounts(group, input.isMain);
+  const adminProfile = getAdminAgentProfile(group.folder);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(
     mounts,
     containerName,
     input.personalMode,
+    adminProfile?.envKeys,
   );
 
   logger.debug(

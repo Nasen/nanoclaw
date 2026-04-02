@@ -2,6 +2,10 @@ import { Server } from 'http';
 import { ChildProcess } from 'child_process';
 
 import {
+  delegateToAdminGroup,
+  resolveDelegationDelivery,
+} from './admin-delegation.js';
+import {
   RcChatMember,
   RcChatSummary,
   RcChatTranscript,
@@ -322,6 +326,57 @@ export function startSubsystems({
         isMain,
         createNotebookLmClient(),
       ),
+    delegateToGroup: async ({
+      sourceGroupFolder,
+      targetGroupFolder,
+      prompt,
+      context,
+    }) => {
+      const groups = registeredGroups();
+      const targetEntry = Object.entries(groups).find(
+        ([, group]) => group.folder === targetGroupFolder,
+      );
+      if (!targetEntry) {
+        throw new Error(`Target group not registered: ${targetGroupFolder}`);
+      }
+      const [targetGroupJid, targetGroup] = targetEntry;
+      const delegated = await delegateToAdminGroup({
+        sourceGroupFolder,
+        targetGroupJid,
+        targetGroup,
+        queue,
+        getAvailableGroups,
+        getRegisteredGroups: registeredGroups,
+        prompt,
+        context,
+      });
+
+      const sourceGroup = Object.values(groups).find(
+        (group) => group.folder === sourceGroupFolder,
+      );
+      const delivery = resolveDelegationDelivery({
+        sourceGroupFolder,
+        sourceGroupName: sourceGroup?.name,
+        targetGroupName: targetGroup.name,
+        prompt,
+        result: delegated.result,
+      });
+
+      if (delivery.postToTargetChat && delivery.targetChatText) {
+        await sendChannelMessage(
+          channels,
+          targetGroupJid,
+          delivery.targetChatText,
+          'bot',
+        );
+      }
+
+      return {
+        result: delivery.callerResult,
+        targetRole: delegated.targetRole,
+        postedToTargetGroup: delivery.postedToTargetGroup,
+      };
+    },
     writeGroupsSnapshot: (
       groupFolder,
       isMain,

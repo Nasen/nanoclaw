@@ -13,6 +13,7 @@ export interface OpenAiMcpServerConfig {
   url?: string;
   requestInit?: RequestInit;
   startupTimeoutMs?: number;
+  allowedToolNames?: string[];
 }
 
 export type ClaudeMcpServerConfig =
@@ -32,6 +33,7 @@ interface McpCapabilityDefinition {
   capability: 'gmail' | 'jira' | 'testit' | 'figma' | 'gitlab' | 'm365';
   promptMatchers: RegExp[];
   claudeToolPatterns: string[];
+  getClaudeToolPatterns?: (context: AgentTurnContext) => string[];
   isAvailable?: (context: AgentTurnContext) => boolean;
   getClaudeServers: (
     context: AgentTurnContext,
@@ -48,6 +50,15 @@ export const SLOW_MCP_STARTUP_TIMEOUT_MS = 180_000;
 const LOCAL_GITLAB_MCP_SERVER_PATH = fileURLToPath(
   new URL('./gitlab-mcp-server.js', import.meta.url),
 );
+const TESTIT_PUBLIC_TOOL_NAMES = ['fetch_test_case'];
+const TESTIT_DIRECT_CASE_TOOL_NAMES = [
+  'fetch_test_case',
+  'get_case_folder_path',
+  'compare_test_case_versions',
+];
+const TESTIT_EXTERNAL_ID_PATTERN = /\b[A-Z][A-Z0-9]+-\d+\b/g;
+const TESTIT_SEARCH_INTENT_PATTERN =
+  /\b(search|find|list|query|matching|similar|multiple|all\s+matching|suite|project)\b/i;
 
 function hasM365McpBinary(): boolean {
   return (
@@ -68,6 +79,14 @@ function collectAgentEnv(context: AgentTurnContext): Record<string, string> {
   );
 }
 
+function getAllowedCapabilities(
+  context: AgentTurnContext,
+): Set<McpCapabilityDefinition['capability']> | null {
+  const allowed = context.containerInput.allowedExternalMcpCapabilities;
+  if (!allowed || allowed.length === 0) return null;
+  return new Set(allowed);
+}
+
 function buildNanoclawEnv(
   context: AgentTurnContext,
   env: Record<string, string>,
@@ -77,7 +96,75 @@ function buildNanoclawEnv(
     NANOCLAW_CHAT_JID: context.containerInput.chatJid,
     NANOCLAW_GROUP_FOLDER: context.containerInput.groupFolder,
     NANOCLAW_IS_MAIN: context.containerInput.isMain ? '1' : '0',
+    NANOCLAW_ADMIN_ROLE: context.containerInput.adminRole ?? '',
+    NANOCLAW_CAN_SPEAK_AS_OWNER:
+      context.containerInput.canSpeakAsOwner === true ? '1' : '0',
+    NANOCLAW_ALLOWED_NANO_TOOLS: (
+      context.containerInput.allowedNanoclawTools ?? []
+    ).join(','),
+    NANOCLAW_ALLOWED_PEER_GROUPS: (
+      context.containerInput.allowedPeerGroups ?? []
+    ).join(','),
   };
+}
+
+function hasTestItAccessToken(context: AgentTurnContext): boolean {
+  return Boolean(context.agentEnv.TESTIT_ACCESS_TOKEN?.trim());
+}
+
+function extractLikelyTestItExternalIds(prompt: string): string[] {
+  return [...new Set(prompt.match(TESTIT_EXTERNAL_ID_PATTERN) ?? [])];
+}
+
+function shouldPreferDirectTestItCaseTools(
+  context: AgentTurnContext,
+): boolean {
+  if (TESTIT_SEARCH_INTENT_PATTERN.test(context.prompt)) {
+    return false;
+  }
+
+  return extractLikelyTestItExternalIds(context.prompt).length > 0;
+}
+
+function getTestItClaudeToolPatterns(context: AgentTurnContext): string[] {
+  if (!hasTestItAccessToken(context)) {
+    return TESTIT_PUBLIC_TOOL_NAMES.map(
+      (toolName) => `mcp__testit__${toolName}`,
+    );
+  }
+
+  if (shouldPreferDirectTestItCaseTools(context)) {
+    return TESTIT_DIRECT_CASE_TOOL_NAMES.map(
+      (toolName) => `mcp__testit__${toolName}`,
+    );
+  }
+
+  if (hasTestItAccessToken(context)) {
+    return ['mcp__testit__*'];
+  }
+
+  return TESTIT_PUBLIC_TOOL_NAMES.map((toolName) => `mcp__testit__${toolName}`);
+}
+
+function getTestItAllowedToolNames(
+  context: AgentTurnContext,
+): string[] | undefined {
+  if (!hasTestItAccessToken(context)) {
+    return [...TESTIT_PUBLIC_TOOL_NAMES];
+  }
+
+  if (shouldPreferDirectTestItCaseTools(context)) {
+    return [...TESTIT_DIRECT_CASE_TOOL_NAMES];
+  }
+
+  return undefined;
+}
+
+function getClaudeToolPatternsForCapability(
+  capability: McpCapabilityDefinition,
+  context: AgentTurnContext,
+): string[] {
+  return capability.getClaudeToolPatterns?.(context) ?? capability.claudeToolPatterns;
 }
 
 const MCP_CAPABILITIES: McpCapabilityDefinition[] = [
@@ -145,7 +232,8 @@ const MCP_CAPABILITIES: McpCapabilityDefinition[] = [
     capability: 'testit',
     promptMatchers: [/\b(testit|test case|test plan)\b/i],
     claudeToolPatterns: ['mcp__testit__*'],
-    getClaudeServers: () => ({
+    getClaudeToolPatterns: getTestItClaudeToolPatterns,
+    getClaudeServers: (_context, env) => ({
       testit: {
         command: 'npx',
         args: [
@@ -154,6 +242,10 @@ const MCP_CAPABILITIES: McpCapabilityDefinition[] = [
           'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
           '@ringcentral/mcp-testit-fetcher',
         ],
+        env: {
+          ...env,
+          TESTIT_ACCESS_TOKEN: env.TESTIT_ACCESS_TOKEN ?? '',
+        },
       },
     }),
     getOpenAiServers: (_context, env) => [
@@ -167,8 +259,12 @@ const MCP_CAPABILITIES: McpCapabilityDefinition[] = [
           'https://nexus-xmn02.int.rclabenv.com/nexus/content/groups/npm-all/',
           '@ringcentral/mcp-testit-fetcher',
         ],
-        env,
+        env: {
+          ...env,
+          TESTIT_ACCESS_TOKEN: env.TESTIT_ACCESS_TOKEN ?? '',
+        },
         startupTimeoutMs: SLOW_MCP_STARTUP_TIMEOUT_MS,
+        allowedToolNames: getTestItAllowedToolNames(_context),
       },
     ],
   },
@@ -274,6 +370,19 @@ function requestedCapabilities(prompt: string): McpCapabilityDefinition[] {
   );
 }
 
+function getPromptScopedCapabilities(
+  context: AgentTurnContext,
+): McpCapabilityDefinition[] {
+  const allowedCapabilities = getAllowedCapabilities(context);
+
+  return requestedCapabilities(context.prompt).filter((capability) => {
+    if (allowedCapabilities && !allowedCapabilities.has(capability.capability)) {
+      return false;
+    }
+    return isCapabilityAvailable(capability, context);
+  });
+}
+
 export function getClaudeAllowedToolPatterns(personalMode: boolean): string[] {
   if (!personalMode) return ['mcp__nanoclaw__*'];
 
@@ -281,6 +390,18 @@ export function getClaudeAllowedToolPatterns(personalMode: boolean): string[] {
     'mcp__nanoclaw__*',
     ...MCP_CAPABILITIES.flatMap((capability) => capability.claudeToolPatterns),
   ];
+}
+
+export function getClaudeAllowedToolPatternsForContext(
+  context: AgentTurnContext,
+): string[] {
+  if (!context.containerInput.personalMode) return ['mcp__nanoclaw__*'];
+
+  const allowedPatterns = getPromptScopedCapabilities(context).flatMap(
+    (capability) => getClaudeToolPatternsForCapability(capability, context),
+  );
+
+  return ['mcp__nanoclaw__*', ...allowedPatterns];
 }
 
 export function getClaudeMcpServers(
@@ -297,8 +418,7 @@ export function getClaudeMcpServers(
 
   if (!context.containerInput.personalMode) return servers;
 
-  for (const capability of MCP_CAPABILITIES) {
-    if (!isCapabilityAvailable(capability, context)) continue;
+  for (const capability of getPromptScopedCapabilities(context)) {
     Object.assign(servers, capability.getClaudeServers(context, env));
   }
 
@@ -309,6 +429,7 @@ export function getOpenAiMcpServerConfigs(
   context: AgentTurnContext,
 ): OpenAiMcpServerConfig[] {
   const env = collectAgentEnv(context);
+  const allowedCapabilities = getAllowedCapabilities(context);
   const configs: OpenAiMcpServerConfig[] = [
     {
       serverName: 'nanoclaw',
@@ -324,6 +445,12 @@ export function getOpenAiMcpServerConfigs(
   if (!context.containerInput.personalMode) return configs;
 
   for (const capability of requestedCapabilities(context.prompt)) {
+    if (
+      allowedCapabilities &&
+      !allowedCapabilities.has(capability.capability)
+    ) {
+      continue;
+    }
     if (!isCapabilityAvailable(capability, context)) continue;
     configs.push(...capability.getOpenAiServers(context, env));
   }

@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { getAdminAgentProfile } from './admin-agents.js';
 import { getAgentBackendConfig } from './agent-backend.js';
 import {
   CONTAINER_HOST_GATEWAY,
@@ -44,6 +45,8 @@ const SESSION_SETTINGS = {
   },
 };
 
+const SESSION_REMOTE_SETTINGS = {};
+
 function ensureGroupSessionsDir(group: RegisteredGroup): string {
   const groupSessionsRoot = path.join(DATA_DIR, 'sessions', group.folder);
   const groupSessionsDir = path.join(groupSessionsRoot, '.claude');
@@ -55,6 +58,14 @@ function ensureGroupSessionsDir(group: RegisteredGroup): string {
     fs.writeFileSync(
       settingsFile,
       `${JSON.stringify(SESSION_SETTINGS, null, 2)}\n`,
+    );
+  }
+
+  const remoteSettingsFile = path.join(groupSessionsDir, 'remote-settings.json');
+  if (!fs.existsSync(remoteSettingsFile)) {
+    fs.writeFileSync(
+      remoteSettingsFile,
+      `${JSON.stringify(SESSION_REMOTE_SETTINGS, null, 2)}\n`,
     );
   }
 
@@ -81,8 +92,18 @@ function ensureGroupIpcDir(group: RegisteredGroup): string {
   return groupIpcDir;
 }
 
-function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
-  if (personalMode && fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))) {
+function addProfileMounts(
+  mounts: VolumeMount[],
+  personalMode: boolean,
+  group: RegisteredGroup,
+): void {
+  const profile = getAdminAgentProfile(group.folder);
+
+  if (
+    personalMode &&
+    (profile?.mountGmailTokens ?? true) &&
+    fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))
+  ) {
     mounts.push({
       hostPath: path.join(os.homedir(), '.gmail-mcp'),
       containerPath: '/home/node/.gmail-mcp',
@@ -91,7 +112,11 @@ function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
   }
 
   const outlookTokenFile = path.join(os.homedir(), '.outlook-mcp-tokens.json');
-  if (personalMode && fs.existsSync(outlookTokenFile)) {
+  if (
+    personalMode &&
+    (profile?.mountOutlookTokens ?? true) &&
+    fs.existsSync(outlookTokenFile)
+  ) {
     mounts.push({
       hostPath: outlookTokenFile,
       containerPath: '/home/node/.outlook-mcp-tokens.json',
@@ -105,7 +130,7 @@ function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
     'figmainhousemcp',
     'dist',
   );
-  if (fs.existsSync(figmaMcpDir)) {
+  if ((profile?.mountFigmaMcp ?? true) && fs.existsSync(figmaMcpDir)) {
     mounts.push({
       hostPath: figmaMcpDir,
       containerPath: '/workspace/figma-mcp',
@@ -113,7 +138,11 @@ function addPersonalMounts(mounts: VolumeMount[], personalMode: boolean): void {
     });
   }
 
-  if (personalMode && hasGitAuthDir()) {
+  if (
+    personalMode &&
+    (profile?.allowGitAuth ?? true) &&
+    hasGitAuthDir()
+  ) {
     mounts.push({
       hostPath: getGitAuthPaths().hostDir,
       containerPath: CONTAINER_GIT_AUTH_DIR,
@@ -156,6 +185,13 @@ function getSharedMainFolderAdditionalMounts(): AdditionalMount[] {
   return rcPersonalGroup?.containerConfig?.additionalMounts ?? [];
 }
 
+function getSupervisorProjectMounts(): AdditionalMount[] {
+  return getSharedMainFolderAdditionalMounts().filter((mount) => {
+    const containerPath = mount.containerPath || path.basename(mount.hostPath);
+    return containerPath === 'projects';
+  });
+}
+
 function mergeAdditionalMounts(
   inheritedMounts: AdditionalMount[],
   ownMounts: AdditionalMount[],
@@ -179,6 +215,25 @@ function resolveEffectiveAdditionalMounts(
   group: RegisteredGroup,
 ): AdditionalMount[] {
   const ownMounts = group.containerConfig?.additionalMounts ?? [];
+  const profile = getAdminAgentProfile(group.folder);
+
+  if (profile?.mountProfile === 'supervisor') {
+    return ownMounts;
+  }
+  if (profile?.mountProfile === 'projects-readwrite') {
+    return mergeAdditionalMounts(getSupervisorProjectMounts(), ownMounts);
+  }
+  if (profile?.mountProfile === 'projects-readonly') {
+    const readonlyProjectMounts = getSupervisorProjectMounts().map((mount) => ({
+      ...mount,
+      readonly: true,
+    }));
+    return mergeAdditionalMounts(readonlyProjectMounts, ownMounts);
+  }
+  if (profile?.mountProfile === 'none') {
+    return ownMounts;
+  }
+
   if (
     group.folder === 'rc-personal' ||
     !isMainFolder(group.folder, GROUPS_DIR)
@@ -252,7 +307,7 @@ export function buildVolumeMounts(
   });
 
   const personalMode = isMain || isPersonalFolder(group.folder, GROUPS_DIR);
-  addPersonalMounts(mounts, personalMode);
+  addProfileMounts(mounts, personalMode, group);
 
   const caBundleMount = resolveCaBundleMount();
   if (caBundleMount) {
@@ -277,6 +332,7 @@ export function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   personalMode = false,
+  envKeys?: string[],
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
   const backendConfig = getAgentBackendConfig();
@@ -328,7 +384,7 @@ export function buildContainerArgs(
   args.push(...hostGatewayArgs());
 
   if (personalMode) {
-    const thirdPartyEnv = readEnvFile([
+    const defaultKeys = [
       'JIRA_TOKEN',
       'CONFLUENCE_READ_TOKEN',
       'GITLAB_PERSONAL_ACCESS_TOKEN',
@@ -342,7 +398,8 @@ export function buildContainerArgs(
       'JENKINS_URL',
       'JENKINS_USER',
       'JENKINS_TOKEN',
-    ]);
+    ];
+    const thirdPartyEnv = readEnvFile(envKeys ?? defaultKeys);
     for (const [key, value] of Object.entries(thirdPartyEnv)) {
       if (value) args.push('-e', `${key}=${value}`);
     }

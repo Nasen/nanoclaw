@@ -105,6 +105,10 @@ beforeEach(() => {
       createdSources: [],
       uploadedFiles: [],
     }),
+    delegateToGroup: async () => ({
+      result: 'delegated result',
+      targetRole: 'specialist',
+    }),
   };
 
   fs.rmSync(path.join(DATA_DIR, 'ipc'), { recursive: true, force: true });
@@ -915,6 +919,108 @@ describe('RingCentral IPC handlers', () => {
   });
 });
 
+describe('Admin specialist IPC policy', () => {
+  it('allows delegation to a whitelisted peer specialist', async () => {
+    const delegateToGroup = vi.fn(async () => ({
+      result: 'delegated result',
+      targetRole: 'jiraops',
+    }));
+    deps.delegateToGroup = delegateToGroup;
+
+    await processTaskIpc(
+      {
+        type: 'delegate_to_group',
+        targetGroupFolder: 'rc-grp-nanoclaw-jiraops',
+        prompt: 'Create a Jira issue summary',
+        requestId: 'delegate-ok',
+      },
+      'rc-grp-nanoclaw-gitops',
+      true,
+      deps,
+    );
+
+    expect(delegateToGroup).toHaveBeenCalledWith({
+      sourceGroupFolder: 'rc-grp-nanoclaw-gitops',
+      targetGroupFolder: 'rc-grp-nanoclaw-jiraops',
+      prompt: 'Create a Jira issue summary',
+      context: undefined,
+    });
+
+    const responsePath = path.join(
+      DATA_DIR,
+      'ipc',
+      'rc-grp-nanoclaw-gitops',
+      'responses',
+      'delegate-ok.json',
+    );
+    const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8')) as {
+      ok: boolean;
+      targetRole?: string;
+      result?: string;
+    };
+
+    expect(response).toMatchObject({
+      ok: true,
+      targetRole: 'jiraops',
+      result: 'delegated result',
+    });
+  });
+
+  it('blocks delegation to a non-whitelisted peer specialist', async () => {
+    const delegateToGroup = vi.fn(async () => ({
+      result: 'delegated result',
+      targetRole: 'gitops',
+    }));
+    deps.delegateToGroup = delegateToGroup;
+
+    await processTaskIpc(
+      {
+        type: 'delegate_to_group',
+        targetGroupFolder: 'rc-grp-nanoclaw-gitops',
+        prompt: 'Review this repository state',
+        requestId: 'delegate-blocked',
+      },
+      'rc-grp-nanoclaw-peopleops',
+      true,
+      deps,
+    );
+
+    expect(delegateToGroup).not.toHaveBeenCalled();
+
+    const responsePath = path.join(
+      DATA_DIR,
+      'ipc',
+      'rc-grp-nanoclaw-peopleops',
+      'responses',
+      'delegate-blocked.json',
+    );
+    const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8')) as {
+      ok: boolean;
+      error?: string;
+    };
+
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('is not allowed');
+  });
+
+  it('blocks supervisor-only register_group from specialist admin teams', async () => {
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        jid: 'specialist-new@g.us',
+        name: 'Blocked Group',
+        folder: 'blocked-group',
+        trigger: '@NanoClaw',
+      },
+      'rc-grp-nanoclaw-gitops',
+      true,
+      deps,
+    );
+
+    expect(getRegisteredGroup('specialist-new@g.us')).toBeUndefined();
+  });
+});
+
 describe('NotebookLM IPC handlers', () => {
   it('creates a notebook through the host NotebookLM service', async () => {
     const createNotebook = vi.fn(async (title: string) => ({
@@ -936,7 +1042,7 @@ describe('NotebookLM IPC handlers', () => {
     expect(createNotebook).toHaveBeenCalledWith('Research Notes');
   });
 
-  it('adds NotebookLM sources with group context for file-path validation', async () => {
+  it('adds NotebookLM sources for a supervisor-capable group', async () => {
     const addSources = vi.fn(async () => ({
       createdSources: [],
       uploadedFiles: [],
@@ -949,16 +1055,53 @@ describe('NotebookLM IPC handlers', () => {
         notebookId: 'nb-1',
         sources: [{ type: 'text', text: 'hello' }],
       },
-      'other-group',
-      false,
+      'whatsapp_main',
+      true,
       deps,
     );
 
     expect(addSources).toHaveBeenCalledWith(
       'nb-1',
       [{ type: 'text', text: 'hello' }],
+      'whatsapp_main',
+      true,
+    );
+  });
+
+  it('blocks NotebookLM sources from non-admin groups', async () => {
+    const addSources = vi.fn(async () => ({
+      createdSources: [],
+      uploadedFiles: [],
+    }));
+    deps.notebookLmAddSources = addSources;
+
+    await processTaskIpc(
+      {
+        type: 'notebooklm_add_sources',
+        notebookId: 'nb-1',
+        sources: [{ type: 'text', text: 'hello' }],
+        requestId: 'nb-blocked',
+      },
       'other-group',
       false,
+      deps,
     );
+
+    expect(addSources).not.toHaveBeenCalled();
+
+    const responsePath = path.join(
+      DATA_DIR,
+      'ipc',
+      'other-group',
+      'responses',
+      'nb-blocked.json',
+    );
+    const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8')) as {
+      ok: boolean;
+      error?: string;
+    };
+
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('NotebookLM tools are restricted');
   });
 });

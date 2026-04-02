@@ -20,6 +20,22 @@ const RESPONSES_DIR = path.join(IPC_DIR, 'responses');
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
 const groupFolder = process.env.NANOCLAW_GROUP_FOLDER!;
 const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+const allowedNanoclawTools = new Set(
+  (process.env.NANOCLAW_ALLOWED_NANO_TOOLS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const allowedPeerGroups = new Set(
+  (process.env.NANOCLAW_ALLOWED_PEER_GROUPS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+
+function isToolAllowed(name: string): boolean {
+  return allowedNanoclawTools.size === 0 || allowedNanoclawTools.has(name);
+}
 
 function writeIpcFile(dir: string, data: object): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -127,7 +143,29 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
-server.registerTool(
+type ToolSchemaShape = Record<string, z.ZodTypeAny>;
+type ToolArgs<TShape extends ToolSchemaShape> = z.infer<z.ZodObject<TShape>>;
+type ToolConfig<TShape extends ToolSchemaShape> = {
+  description: string;
+  inputSchema: TShape;
+};
+
+const registerTool = <TShape extends ToolSchemaShape>(
+  name: string,
+  config: ToolConfig<TShape>,
+  handler: (args: ToolArgs<TShape>) => Promise<unknown>,
+): void => {
+  if (!isToolAllowed(name)) return;
+  (
+    server.registerTool as <TSchema extends ToolSchemaShape>(
+      toolName: string,
+      toolConfig: ToolConfig<TSchema>,
+      toolHandler: (args: ToolArgs<TSchema>) => Promise<unknown>,
+    ) => void
+  )(name, config, handler);
+};
+
+registerTool(
   'list_notebooklm_notebooks',
   {
     description:
@@ -184,7 +222,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'create_notebooklm_notebook',
   {
     description:
@@ -235,7 +273,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'get_notebooklm_notebook',
   {
     description:
@@ -286,7 +324,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'add_notebooklm_sources',
   {
     description:
@@ -344,7 +382,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'send_message',
   {
     description:
@@ -389,7 +427,90 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
+  'delegate_to_group',
+  {
+    description:
+      'Ask another admin specialist agent to handle a bounded subtask and return its result. Use this for cooperation across admin teams, not for messaging humans.',
+    inputSchema: {
+      target_group: z
+        .string()
+        .describe('Target admin group folder, for example rc-grp-nanoclaw-jiraops.'),
+      task: z
+        .string()
+        .describe('The exact subtask for the target specialist agent.'),
+      context: z
+        .string()
+        .optional()
+        .describe('Optional extra context to include with the delegation.'),
+    },
+  },
+  async (args) => {
+    if (allowedPeerGroups.size > 0 && !allowedPeerGroups.has(args.target_group)) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Delegation to ${args.target_group} is not allowed from this agent.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    try {
+      const response = await requestTask(
+        'delegate_to_group',
+        {
+          targetGroupFolder: args.target_group,
+          prompt: args.task,
+          context: args.context,
+        },
+        300000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Delegation failed.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                targetGroup: response.targetGroup,
+                targetRole: response.targetRole,
+                result: response.result,
+                postedToTargetGroup: response.postedToTargetGroup === true,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
   'schedule_task',
   {
     description: `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
@@ -532,7 +653,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
   },
 );
 
-server.registerTool(
+registerTool(
   'list_tasks',
   {
     description:
@@ -599,7 +720,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'list_rc_chats',
   {
     description:
@@ -672,7 +793,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'read_rc_messages',
   {
     description:
@@ -742,7 +863,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'send_rc_message',
   {
     description:
@@ -807,7 +928,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'send_rc_dm',
   {
     description:
@@ -872,7 +993,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'list_rc_chat_members',
   {
     description: 'List members in a RingCentral team or DM chat.',
@@ -930,7 +1051,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'get_rc_presence',
   {
     description:
@@ -982,7 +1103,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'set_rc_presence',
   {
     description: 'Update your RingCentral presence and/or DND status.',
@@ -1044,7 +1165,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'get_rc_extension',
   {
     description:
@@ -1096,7 +1217,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'list_rc_extensions',
   {
     description:
@@ -1156,7 +1277,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'list_rc_contacts',
   {
     description:
@@ -1218,7 +1339,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'create_rc_contact',
   {
     description: 'Create a RingCentral personal contact.',
@@ -1280,7 +1401,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'list_rc_phone_numbers',
   {
     description:
@@ -1337,7 +1458,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'pause_task',
   {
     description: 'Pause a scheduled task. It will not run until resumed.',
@@ -1367,7 +1488,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'resume_task',
   {
     description: 'Resume a paused task.',
@@ -1397,7 +1518,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'cancel_task',
   {
     description: 'Cancel and delete a scheduled task.',
@@ -1427,7 +1548,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'update_task',
   {
     description:
@@ -1508,7 +1629,7 @@ server.registerTool(
   },
 );
 
-server.registerTool(
+registerTool(
   'register_group',
   {
     description: `Register a new chat/group so the agent can respond to messages there. Main group only.

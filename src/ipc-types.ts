@@ -92,4 +92,10 @@ export interface IpcDeps {
     sourceGroup: string,
     isMain: boolean,
   ) => Promise<NotebookLmAddSourcesResult>;
+  delegateToGroup: (params: {
+    sourceGroupFolder: string;
+    targetGroupFolder: string;
+    prompt: string;
+    context?: string;
+  }) => Promise<{ result: string | null; targetRole: string | null }>;
 }

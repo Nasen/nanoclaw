@@ -2,6 +2,10 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
+import {
+  getAdminAgentProfile,
+  getAdminAgentPromptHeader,
+} from './admin-agents.js';
 import { ASSISTANT_NAME, TIMEZONE } from './config.js';
 import { runContainerAgent } from './container-runner.js';
 import { ContainerOutput } from './container-contract.js';
@@ -12,7 +16,7 @@ import {
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
-import { isMainGroup } from './group-access.js';
+import { isMainGroup, isPersonalModeGroup } from './group-access.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
@@ -206,6 +210,7 @@ export async function runScheduledTask(
 
   let result: string | null = null;
   let error: string | null = null;
+  const adminProfile = getAdminAgentProfile(group.folder);
   const { scheduleClose, clearCloseTimer } = createCloseSchedulerTaskContainer(
     task,
     deps.queue,
@@ -215,10 +220,17 @@ export async function runScheduledTask(
     const output = await runContainerAgent(
       group,
       {
-        prompt: task.prompt,
+        prompt: `${getAdminAgentPromptHeader(group)}${task.prompt}`,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain: isMainGroup(group),
+        personalMode: isPersonalModeGroup(group),
+        adminRole: adminProfile?.role,
+        canSpeakAsOwner: adminProfile?.canSpeakAsOwner,
+        allowedExternalMcpCapabilities:
+          adminProfile?.externalMcpCapabilities ?? [],
+        allowedNanoclawTools: adminProfile?.nanoclawTools ?? [],
+        allowedPeerGroups: adminProfile?.allowedPeers ?? [],
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
       },
