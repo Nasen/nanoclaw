@@ -137,10 +137,7 @@ async function tryAutoDelegateSupervisorTurn(params: {
   channels: import('./types.js').Channel[];
   getAvailableGroups: () => AvailableGroup[];
   getRegisteredGroups: () => Record<string, RegisteredGroup>;
-}): Promise<
-  | { status: 'delegated' }
-  | { status: 'fallback'; reason: string }
-> {
+}): Promise<{ status: 'delegated' } | { status: 'fallback'; reason: string }> {
   if (
     params.routingDecision.mode !== 'delegate' ||
     !params.routingDecision.targetGroupFolder
@@ -184,7 +181,11 @@ async function tryAutoDelegateSupervisorTurn(params: {
 
     if (delivery.postToTargetChat && delivery.targetChatText) {
       const { resolveOutboundTarget } = await import('./router.js');
-      const target = resolveOutboundTarget(params.channels, targetGroupJid, 'bot');
+      const target = resolveOutboundTarget(
+        params.channels,
+        targetGroupJid,
+        'bot',
+      );
       if (!target) {
         throw new Error(`No outbound channel for ${targetGroupJid}`);
       }
@@ -220,7 +221,9 @@ async function tryAutoDelegateSupervisorTurn(params: {
     return {
       status: 'fallback',
       reason:
-        err instanceof Error ? err.message : 'Supervisor auto-delegation failed.',
+        err instanceof Error
+          ? err.message
+          : 'Supervisor auto-delegation failed.',
     };
   }
 }
@@ -299,7 +302,9 @@ export async function processGroupMessages(
     personalRcDm,
     autoAssistEnabled: deps.autoAssistEnabled(),
   });
-  const routingPromptText = missedMessages.map((message) => message.content).join('\n');
+  const routingPromptText = missedMessages
+    .map((message) => message.content)
+    .join('\n');
   const registeredGroups = deps.getRegisteredGroups();
   const supervisorRoute = isSupervisorGroup(group.folder)
     ? resolveSupervisorRoute({
@@ -323,13 +328,11 @@ export async function processGroupMessages(
         mode: supervisorRoute.mode,
         confidence: supervisorRoute.confidence,
         targetGroupFolder: supervisorRoute.targetGroupFolder,
-        topScores: supervisorRoute.scoreBreakdown
-          .slice(0, 3)
-          .map((entry) => ({
-            role: entry.role,
-            score: entry.score,
-            targetGroupFolder: entry.targetGroupFolder,
-          })),
+        topScores: supervisorRoute.scoreBreakdown.slice(0, 3).map((entry) => ({
+          role: entry.role,
+          score: entry.score,
+          targetGroupFolder: entry.targetGroupFolder,
+        })),
         reason: supervisorRoute.reason,
       },
       'Supervisor route decision',

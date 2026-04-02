@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 
-import { canAdminAgentSpeakAsOwner, getAdminAgentProfile } from './admin-agents.js';
+import {
+  canAdminAgentSpeakAsOwner,
+  getAdminAgentProfile,
+} from './admin-agents.js';
 import { logger } from './logger.js';
 import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import {
@@ -59,21 +62,19 @@ export async function processMessageFiles(
               ? 'bot'
               : deliveryDecision.mode;
           const outboundText =
-            isRingCentralChatJid(data.chatJid) &&
-            deliveryMode === 'personal'
+            isRingCentralChatJid(data.chatJid) && deliveryMode === 'personal'
               ? formatOnBehalfAssistantMessage(data.text)
               : data.text;
-          if (deliveryDecision.mode === 'personal' && deliveryMode !== 'personal') {
+          if (
+            deliveryDecision.mode === 'personal' &&
+            deliveryMode !== 'personal'
+          ) {
             logger.warn(
               { chatJid: data.chatJid, sourceGroup },
               'Downgrading unauthorized owner-voice IPC message to bot delivery',
             );
           }
-          await deps.sendMessage(
-            data.chatJid,
-            outboundText,
-            deliveryMode,
-          );
+          await deps.sendMessage(data.chatJid, outboundText, deliveryMode);
           logger.info(
             {
               chatJid: data.chatJid,
@@ -82,7 +83,8 @@ export async function processMessageFiles(
               deliveryMode,
               onBehalfIntent: data.onBehalfIntent === true,
               policyForced:
-                deliveryDecision.policyForced || deliveryMode !== deliveryDecision.mode,
+                deliveryDecision.policyForced ||
+                deliveryMode !== deliveryDecision.mode,
             },
             'IPC message sent',
           );

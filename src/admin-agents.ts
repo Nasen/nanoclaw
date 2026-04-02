@@ -193,11 +193,7 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfile> = {
   peopleops: {
     nanoclawTools: [...BASE_SPECIALIST_TOOLS, ...PEOPLEOPS_RC_READ_TOOLS],
     externalMcpCapabilities: ['gmail', 'm365'],
-    envKeys: [
-      'OUTLOOK_CLIENT_ID',
-      'OUTLOOK_CLIENT_SECRET',
-      'MS_TENANT_ID',
-    ],
+    envKeys: ['OUTLOOK_CLIENT_ID', 'OUTLOOK_CLIENT_SECRET', 'MS_TENANT_ID'],
     mountGmailTokens: true,
     mountOutlookTokens: true,
     mountFigmaMcp: false,

@@ -61,7 +61,10 @@ function ensureGroupSessionsDir(group: RegisteredGroup): string {
     );
   }
 
-  const remoteSettingsFile = path.join(groupSessionsDir, 'remote-settings.json');
+  const remoteSettingsFile = path.join(
+    groupSessionsDir,
+    'remote-settings.json',
+  );
   if (!fs.existsSync(remoteSettingsFile)) {
     fs.writeFileSync(
       remoteSettingsFile,
@@ -138,11 +141,7 @@ function addProfileMounts(
     });
   }
 
-  if (
-    personalMode &&
-    (profile?.allowGitAuth ?? true) &&
-    hasGitAuthDir()
-  ) {
+  if (personalMode && (profile?.allowGitAuth ?? true) && hasGitAuthDir()) {
     mounts.push({
       hostPath: getGitAuthPaths().hostDir,
       containerPath: CONTAINER_GIT_AUTH_DIR,

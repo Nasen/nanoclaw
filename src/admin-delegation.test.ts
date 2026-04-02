@@ -8,16 +8,16 @@ describe('resolveDelegationDelivery', () => {
       sourceGroupFolder: 'rc-personal',
       sourceGroupName: 'NanoClaw-Personal',
       targetGroupName: 'NanoClaw-GitOps',
-      prompt: 'Show today\'s commits for jupiter-video-e2e.',
-      result: 'Today\'s commits are:\n- abc123 fix pipeline',
+      prompt: "Show today's commits for jupiter-video-e2e.",
+      result: "Today's commits are:\n- abc123 fix pipeline",
     });
 
     expect(resolved).toEqual({
       postToTargetChat: true,
       targetChatText:
         '[Delegated from NanoClaw-Personal]\n' +
-        'Task: Show today\'s commits for jupiter-video-e2e.\n\n' +
-        'Today\'s commits are:\n- abc123 fix pipeline',
+        "Task: Show today's commits for jupiter-video-e2e.\n\n" +
+        "Today's commits are:\n- abc123 fix pipeline",
       callerResult:
         'The delegated result has already been posted in NanoClaw-GitOps. ' +
         'Do not send any additional RingCentral message to that team for this task. ' +

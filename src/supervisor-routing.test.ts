@@ -40,16 +40,8 @@ function makeRegisteredGroups(): Record<string, RegisteredGroup> {
       'NanoClaw-JiraOps',
       'rcb:158813085702',
     ),
-    makeGroup(
-      'rc-grp-nanoclaw-ciops',
-      'NanoClaw-CIOps',
-      'rcb:158813724678',
-    ),
-    makeGroup(
-      'rc-grp-nanoclaw-gitops',
-      'NanoClaw-GitOps',
-      'rcb:158812848134',
-    ),
+    makeGroup('rc-grp-nanoclaw-ciops', 'NanoClaw-CIOps', 'rcb:158813724678'),
+    makeGroup('rc-grp-nanoclaw-gitops', 'NanoClaw-GitOps', 'rcb:158812848134'),
     makeGroup(
       'rc-grp-nanoclaw-feature-development',
       'NanoClaw-Feature Development',
@@ -71,9 +63,7 @@ describe('resolveSupervisorRoute', () => {
     });
 
     expect(decision.mode).toBe('delegate');
-    expect(decision.targetGroupFolder).toBe(
-      'rc-grp-nanoclaw-test-automation',
-    );
+    expect(decision.targetGroupFolder).toBe('rc-grp-nanoclaw-test-automation');
     expect(decision.confidence).toBe('high');
   });
 

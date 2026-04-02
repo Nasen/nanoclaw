@@ -630,7 +630,8 @@ export async function processTaskIpc(
       ) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
-          error: 'Owner-voice RingCentral sending is restricted to rc-personal.',
+          error:
+            'Owner-voice RingCentral sending is restricted to rc-personal.',
         });
         break;
       }
@@ -942,9 +943,7 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_list_notebooks': {
-      if (
-        !hasToolAccess(sourceGroup, 'list_notebooklm_notebooks', isMain)
-      ) {
+      if (!hasToolAccess(sourceGroup, 'list_notebooklm_notebooks', isMain)) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'NotebookLM tools are restricted in this group.',
@@ -967,9 +966,7 @@ export async function processTaskIpc(
     }
 
     case 'notebooklm_create_notebook': {
-      if (
-        !hasToolAccess(sourceGroup, 'create_notebooklm_notebook', isMain)
-      ) {
+      if (!hasToolAccess(sourceGroup, 'create_notebooklm_notebook', isMain)) {
         writeTaskResponse(sourceGroup, data.requestId, {
           ok: false,
           error: 'NotebookLM tools are restricted in this group.',

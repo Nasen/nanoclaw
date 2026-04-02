@@ -1,7 +1,10 @@
 import { getAdminAgentProfile, isSupervisorGroup } from './admin-agents.js';
 import { AvailableGroup, ContainerOutput } from './container-contract.js';
 import { runContainerAgent } from './container-runner.js';
-import { writeGroupsSnapshot, writeTasksSnapshot } from './container-snapshots.js';
+import {
+  writeGroupsSnapshot,
+  writeTasksSnapshot,
+} from './container-snapshots.js';
 import { getAllTasks, getSession, setSession } from './db.js';
 import { isMainGroup, isPersonalModeGroup } from './group-access.js';
 import { logger } from './logger.js';
@@ -65,7 +68,8 @@ export function resolveDelegationDelivery(params: {
     };
   }
 
-  const sourceLabel = params.sourceGroupName?.trim() || params.sourceGroupFolder;
+  const sourceLabel =
+    params.sourceGroupName?.trim() || params.sourceGroupFolder;
   const trimmedPrompt = params.prompt.trim();
   const headerLines = [`[Delegated from ${sourceLabel}]`];
   if (trimmedPrompt) {

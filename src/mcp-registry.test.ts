@@ -118,11 +118,9 @@ describe('TestIt MCP exposure', () => {
 
 describe('Claude MCP server selection', () => {
   it('keeps plain supervisor RC summary turns on nanoclaw only', async () => {
-    const {
-      getClaudeAllowedToolPatternsForContext,
-      getClaudeMcpServers,
-    } = await import(getMcpRegistryModulePath());
-    const prompt = 'Please summarize ![:Team](158961041414) today\'s message';
+    const { getClaudeAllowedToolPatternsForContext, getClaudeMcpServers } =
+      await import(getMcpRegistryModulePath());
+    const prompt = "Please summarize ![:Team](158961041414) today's message";
     const context = buildTestItContext(
       {
         JIRA_TOKEN: 'jira-token',

@@ -37,12 +37,12 @@ describe('admin agent profiles', () => {
       allowGitAuth: true,
     });
     expect(profile?.externalMcpCapabilities).toContain('gitlab');
-    expect(hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'delegate_to_group')).toBe(
-      true,
-    );
-    expect(hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'send_rc_message')).toBe(
-      false,
-    );
+    expect(
+      hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'delegate_to_group'),
+    ).toBe(true);
+    expect(
+      hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'send_rc_message'),
+    ).toBe(false);
     expect(canAdminAgentSpeakAsOwner('rc-grp-nanoclaw-gitops')).toBe(false);
   });
 

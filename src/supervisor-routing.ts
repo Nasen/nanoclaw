@@ -156,7 +156,11 @@ const ROLE_RULES: RoleRoutingRule[] = [
           'risk',
           'quality',
         ],
-        strongPhrases: ['design test cases', 'test strategy', 'coverage analysis'],
+        strongPhrases: [
+          'design test cases',
+          'test strategy',
+          'coverage analysis',
+        ],
         actionTerms: ['design', 'analyze', 'review', 'plan'],
       }),
   },
@@ -167,9 +171,23 @@ const ROLE_RULES: RoleRoutingRule[] = [
     actionTerms: ['implement', 'build', 'fix', 'debug', 'refactor', 'write'],
     score: (signals) => {
       const score = collectRoleScore(signals, {
-        domainTerms: ['feature', 'bug', 'implementation', 'debug', 'code', 'repo'],
+        domainTerms: [
+          'feature',
+          'bug',
+          'implementation',
+          'debug',
+          'code',
+          'repo',
+        ],
         strongPhrases: ['implement feature', 'fix bug', 'debug this issue'],
-        actionTerms: ['implement', 'build', 'fix', 'debug', 'refactor', 'write'],
+        actionTerms: [
+          'implement',
+          'build',
+          'fix',
+          'debug',
+          'refactor',
+          'write',
+        ],
       });
 
       if (signals.hasRepoReference && signals.hasImplementationVerb) {
@@ -184,7 +202,14 @@ const ROLE_RULES: RoleRoutingRule[] = [
     role: 'gitops',
     domainTerms: ['git', 'branch', 'merge', 'mr', 'commit', 'rebase', 'push'],
     strongPhrases: ['open merge request', 'create branch', 'git operation'],
-    actionTerms: ['commit', 'push', 'rebase', 'merge', 'cherry-pick', 'checkout'],
+    actionTerms: [
+      'commit',
+      'push',
+      'rebase',
+      'merge',
+      'cherry-pick',
+      'checkout',
+    ],
     score: (signals) =>
       collectRoleScore(signals, {
         domainTerms: [
@@ -197,12 +222,27 @@ const ROLE_RULES: RoleRoutingRule[] = [
           'push',
         ],
         strongPhrases: ['open merge request', 'create branch', 'git operation'],
-        actionTerms: ['commit', 'push', 'rebase', 'merge', 'cherry-pick', 'checkout'],
+        actionTerms: [
+          'commit',
+          'push',
+          'rebase',
+          'merge',
+          'cherry-pick',
+          'checkout',
+        ],
       }),
   },
   {
     role: 'jiraops',
-    domainTerms: ['jira', 'ticket', 'issue', 'backlog', 'sprint', 'story', 'epic'],
+    domainTerms: [
+      'jira',
+      'ticket',
+      'issue',
+      'backlog',
+      'sprint',
+      'story',
+      'epic',
+    ],
     strongPhrases: ['update jira', 'create jira', 'triage backlog'],
     actionTerms: ['update', 'create', 'triage', 'move', 'assign', 'summarize'],
     score: (signals) =>
@@ -217,7 +257,14 @@ const ROLE_RULES: RoleRoutingRule[] = [
           'epic',
         ],
         strongPhrases: ['update jira', 'create jira', 'triage backlog'],
-        actionTerms: ['update', 'create', 'triage', 'move', 'assign', 'summarize'],
+        actionTerms: [
+          'update',
+          'create',
+          'triage',
+          'move',
+          'assign',
+          'summarize',
+        ],
       }),
   },
   {
@@ -227,14 +274,32 @@ const ROLE_RULES: RoleRoutingRule[] = [
     actionTerms: ['fix', 'rerun', 'stabilize', 'release', 'diagnose'],
     score: (signals) =>
       collectRoleScore(signals, {
-        domainTerms: ['ci', 'pipeline', 'build', 'jenkins', 'release', 'workflow'],
-        strongPhrases: ['pipeline failure', 'build health', 'release automation'],
+        domainTerms: [
+          'ci',
+          'pipeline',
+          'build',
+          'jenkins',
+          'release',
+          'workflow',
+        ],
+        strongPhrases: [
+          'pipeline failure',
+          'build health',
+          'release automation',
+        ],
         actionTerms: ['fix', 'rerun', 'stabilize', 'release', 'diagnose'],
       }),
   },
   {
     role: 'peopleops',
-    domainTerms: ['people', 'email', 'message', 'follow-up', 'communication', 'contact'],
+    domainTerms: [
+      'people',
+      'email',
+      'message',
+      'follow-up',
+      'communication',
+      'contact',
+    ],
     strongPhrases: ['draft a reply', 'draft a message', 'send a follow-up'],
     actionTerms: ['draft', 'reply', 'follow up', 'summarize', 'communicate'],
     score: (signals) =>
@@ -248,17 +313,34 @@ const ROLE_RULES: RoleRoutingRule[] = [
           'contact',
         ],
         strongPhrases: ['draft a reply', 'draft a message', 'send a follow-up'],
-        actionTerms: ['draft', 'reply', 'follow up', 'summarize', 'communicate'],
+        actionTerms: [
+          'draft',
+          'reply',
+          'follow up',
+          'summarize',
+          'communicate',
+        ],
       }),
   },
   {
     role: 'codereview',
     domainTerms: ['review', 'code review', 'regression', 'risk', 'pr', 'mr'],
-    strongPhrases: ['review this patch', 'perform code review', 'regression analysis'],
+    strongPhrases: [
+      'review this patch',
+      'perform code review',
+      'regression analysis',
+    ],
     actionTerms: ['review', 'analyze', 'inspect', 'check'],
     score: (signals) =>
       collectRoleScore(signals, {
-        domainTerms: ['review', 'code review', 'regression', 'risk', 'pr', 'mr'],
+        domainTerms: [
+          'review',
+          'code review',
+          'regression',
+          'risk',
+          'pr',
+          'mr',
+        ],
         strongPhrases: [
           'review this patch',
           'perform code review',
@@ -269,8 +351,20 @@ const ROLE_RULES: RoleRoutingRule[] = [
   },
   {
     role: 'rcvops',
-    domainTerms: ['incident', 'outage', 'sre', 'service', 'logs', 'diagnose', 'root cause'],
-    strongPhrases: ['root cause analysis', 'incident diagnosis', 'service outage'],
+    domainTerms: [
+      'incident',
+      'outage',
+      'sre',
+      'service',
+      'logs',
+      'diagnose',
+      'root cause',
+    ],
+    strongPhrases: [
+      'root cause analysis',
+      'incident diagnosis',
+      'service outage',
+    ],
     actionTerms: ['diagnose', 'investigate', 'mitigate', 'stabilize', 'fix'],
     score: (signals) =>
       collectRoleScore(signals, {
@@ -283,8 +377,18 @@ const ROLE_RULES: RoleRoutingRule[] = [
           'diagnose',
           'root cause',
         ],
-        strongPhrases: ['root cause analysis', 'incident diagnosis', 'service outage'],
-        actionTerms: ['diagnose', 'investigate', 'mitigate', 'stabilize', 'fix'],
+        strongPhrases: [
+          'root cause analysis',
+          'incident diagnosis',
+          'service outage',
+        ],
+        actionTerms: [
+          'diagnose',
+          'investigate',
+          'mitigate',
+          'stabilize',
+          'fix',
+        ],
       }),
   },
 ];
@@ -407,7 +511,9 @@ function resolveExplicitCollaborators(
   return [...matches];
 }
 
-function confidenceFromMode(mode: SupervisorRouteMode): SupervisorRouteConfidence {
+function confidenceFromMode(
+  mode: SupervisorRouteMode,
+): SupervisorRouteConfidence {
   if (mode === 'delegate') return 'high';
   if (mode === 'collaborate') return 'medium';
   return 'low';
@@ -507,7 +613,8 @@ export function resolveSupervisorRoute(params: {
       confidence: 'medium',
       collaboratorGroupFolders: explicitCollaborators,
       targetGroupFolder: explicitCollaborators[0],
-      reason: 'The user explicitly asked the supervisor to coordinate with a specialist.',
+      reason:
+        'The user explicitly asked the supervisor to coordinate with a specialist.',
       scoreBreakdown: scores,
     };
   }
@@ -522,12 +629,20 @@ export function resolveSupervisorRoute(params: {
     };
   }
 
-  if (second && best.score >= 6 && second.score >= 6 && best.score - second.score <= 2) {
+  if (
+    second &&
+    best.score >= 6 &&
+    second.score >= 6 &&
+    best.score - second.score <= 2
+  ) {
     return {
       mode: 'collaborate',
       confidence: 'medium',
       targetGroupFolder: best.targetGroupFolder,
-      collaboratorGroupFolders: [best.targetGroupFolder, second.targetGroupFolder],
+      collaboratorGroupFolders: [
+        best.targetGroupFolder,
+        second.targetGroupFolder,
+      ],
       reason: summarizeDecisionReason({ mode: 'collaborate', scores }),
       scoreBreakdown: scores,
     };
