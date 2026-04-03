@@ -47,28 +47,34 @@ Messaging Channels
 
 ### Host process
 
-The host remains a single Node.js process, but `src/index.ts` is now a composition root instead of owning all orchestration directly.
+The host remains a single Node.js process, but the direct entrypoint is now intentionally thin.
 
 Current host seams:
-- [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts): startup wiring and composition root
+
+- [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts): process entrypoint and backwards-compatible exports
+- [src/bootstrap/start-app.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/bootstrap/start-app.ts): startup wiring and composition root
 - [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts): persisted runtime state and registered-group state
 - [src/app-controls.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-controls.ts): inbound message handling and service-control commands
 - [src/app-processing.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-processing.ts): message-loop and per-chat processing adapters
 - [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts): subsystem startup, RC host services, IPC dependency wiring, shutdown
+- [src/agent-backends.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/agent-backends.ts): host-side backend catalog and config resolution rules
+- [setup/steps.ts](/Users/nasen.you/Projects/GH/NanoClaw/setup/steps.ts): setup-step registry and CLI help surface
 
 ### Container process
 
 The container runner remains a separate Node package under `container/agent-runner/`.
 
 Current container seams:
+
 - [container/agent-runner/src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/index.ts): container-side turn loop
 - [container/agent-runner/src/types.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/types.ts): provider-facing runtime types
 - [container/agent-runner/src/providers/](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/providers): backend adapters
+- [container/agent-runner/src/providers/registry.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/providers/registry.ts): container-side provider registry
 - [container/agent-runner/src/ipc-mcp-stdio.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/ipc-mcp-stdio.ts): host tool bridge over stdio
 
 ## Startup Sequence
 
-1. [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts) verifies the container runtime and cleans up orphaned NanoClaw containers.
+1. [src/bootstrap/start-app.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/bootstrap/start-app.ts) verifies the container runtime and cleans up orphaned NanoClaw containers.
 2. SQLite is initialized and [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts) loads:
    - registered groups
    - last poll timestamp
@@ -98,6 +104,7 @@ Channel adapter
 ```
 
 Notes:
+
 - service-control commands are intercepted before normal message storage
 - sender allowlist checks happen on inbound storage and again during trigger evaluation
 - slash commands are routed before a normal prompt turn is sent
@@ -114,6 +121,7 @@ group-agent-runner.ts
 ```
 
 Relevant seams:
+
 - [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts): orchestration only
 - [src/group-turn-policy.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-turn-policy.ts): prompt shaping, auto-assist behavior, outbound delivery policy
 - [src/slash-commands.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/slash-commands.ts): `/reset` interception and raw slash forwarding rules
@@ -129,6 +137,7 @@ NanoClaw currently uses a one-chat-one-session model.
 - a reset, eviction, process restart, or container failure may create a new container, but the chat session is resumed from persisted session state when possible
 
 The main lifecycle logic spans:
+
 - [src/group-queue.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-queue.ts)
 - [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts)
 - [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts)
@@ -166,10 +175,22 @@ The host/container contract is now split more explicitly:
 - [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts): actual spawn, stream parsing, timeout handling, log capture
 
 Important current behaviors:
+
 - main folders inherit the extra mount profile from `rc-personal`
 - owner-context containers may receive dedicated Git auth mounts
 - `/workspace/project` stays read-only
 - sticky containers are kept alive between turns until TTL, eviction, reset, restart, or failure
+
+## Extension Registries
+
+NanoClaw now keeps its main extension seams in explicit registries:
+
+- [src/channels/registry.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/channels/registry.ts): channel metadata and factories
+- [src/agent-backends.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/agent-backends.ts): host-side agent backend definitions
+- [container/agent-runner/src/providers/registry.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/providers/registry.ts): container-side provider bindings
+- [setup/steps.ts](/Users/nasen.you/Projects/GH/NanoClaw/setup/steps.ts): setup-step catalog and CLI descriptions
+
+That keeps extension discovery in one place and avoids new capabilities appearing only through hidden switch statements or README-only instructions.
 
 ## Trust and Access Model
 
@@ -181,6 +202,7 @@ This fork currently distinguishes several practical trust levels in code:
 - blocked non-owner RC DMs
 
 Not all of this is yet centralized behind one formal policy module. Some trust behavior still lives across:
+
 - [src/group-access.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-access.ts)
 - [src/message-gating.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/message-gating.ts)
 - [src/service-control.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/service-control.ts)
@@ -191,35 +213,41 @@ That is the next major hardening seam if future work continues.
 
 ## Key Files
 
-| File | Purpose |
-|---|---|
-| [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts) | Startup composition root |
-| [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts) | Persisted runtime state and group registry |
-| [src/app-controls.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-controls.ts) | Inbound channel callbacks and service control |
-| [src/app-processing.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-processing.ts) | Message-loop/process-group adapters |
-| [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts) | Per-chat turn orchestration |
-| [src/group-turn-policy.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-turn-policy.ts) | Prompt shaping and outbound delivery policy |
-| [src/group-queue.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-queue.ts) | Per-chat execution ownership and idle eviction |
-| [src/slash-commands.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/slash-commands.ts) | Slash routing and host-owned commands |
-| [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts) | Mounts, env, personal/main-folder privilege construction |
-| [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts) | Container spawn and streaming output handling |
-| [src/container-contract.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-contract.ts) | Host-side container protocol |
-| [src/container-snapshots.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-snapshots.ts) | Task/group snapshot writers |
-| [src/ipc-watcher.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-watcher.ts) | IPC transport loop |
-| [src/ipc-task-handler.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-task-handler.ts) | IPC capability handling |
-| [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts) | Subsystem startup and host-side service APIs |
-| [src/db.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/db.ts) | SQLite persistence |
+| File                                                                                             | Purpose                                                  |
+| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| [src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/index.ts)                               | Startup composition root                                 |
+| [src/bootstrap/start-app.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/bootstrap/start-app.ts)   | Host bootstrap composition                               |
+| [src/app-runtime-state.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-runtime-state.ts)       | Persisted runtime state and group registry               |
+| [src/app-controls.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-controls.ts)                 | Inbound channel callbacks and service control            |
+| [src/app-processing.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/app-processing.ts)             | Message-loop/process-group adapters                      |
+| [src/group-agent-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-agent-runner.ts)     | Per-chat turn orchestration                              |
+| [src/group-turn-policy.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-turn-policy.ts)       | Prompt shaping and outbound delivery policy              |
+| [src/group-queue.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/group-queue.ts)                   | Per-chat execution ownership and idle eviction           |
+| [src/slash-commands.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/slash-commands.ts)             | Slash routing and host-owned commands                    |
+| [src/channels/registry.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/channels/registry.ts)       | Channel registration catalog                             |
+| [src/agent-backends.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/agent-backends.ts)             | Host-side backend catalog                                |
+| [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts)         | Mounts, env, personal/main-folder privilege construction |
+| [src/container-runner.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-runner.ts)         | Container spawn and streaming output handling            |
+| [src/container-contract.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-contract.ts)     | Host-side container protocol                             |
+| [src/container-snapshots.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-snapshots.ts)   | Task/group snapshot writers                              |
+| [src/ipc-watcher.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-watcher.ts)                   | IPC transport loop                                       |
+| [src/ipc-task-handler.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/ipc-task-handler.ts)         | IPC capability handling                                  |
+| [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts) | Subsystem startup and host-side service APIs             |
+| [setup/steps.ts](/Users/nasen.you/Projects/GH/NanoClaw/setup/steps.ts)                           | Setup-step registry                                      |
+| [src/db.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/db.ts)                                     | SQLite persistence                                       |
 
 ## Merge-Hardening Guidance
 
 These are the local seams that now exist specifically to reduce future merge pain with `upstream/main`:
 
 - keep `src/index.ts` thin; do not move policy back into it
+- keep startup composition in `src/bootstrap/start-app.ts`
 - keep IPC transport concerns in `src/ipc-watcher.ts`, not `src/ipc.ts`
 - keep container protocol, timeout policy, and snapshot writing out of `src/container-runner.ts`
 - keep group prompt/delivery policy in `src/group-turn-policy.ts`, not mixed back into `src/group-agent-runner.ts`
 
 Current remaining hot spots for future merges:
+
 - [src/container-config.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/container-config.ts)
 - [src/orchestrator-runtime.ts](/Users/nasen.you/Projects/GH/NanoClaw/src/orchestrator-runtime.ts)
 - [container/agent-runner/src/index.ts](/Users/nasen.you/Projects/GH/NanoClaw/container/agent-runner/src/index.ts)

@@ -76,6 +76,7 @@ docker build -t nanoclaw-agent-v3:latest container/
 **Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that it's safe to make changes.
 
 **AI-native.**
+
 - No installation wizard; Claude Code guides setup.
 - No monitoring dashboard; ask Claude what's happening.
 - No debugging tools; describe the problem and Claude fixes it.
@@ -107,6 +108,7 @@ Talk to your assistant with the trigger word (default: `@Andy`):
 ```
 
 From the main channel (your self-chat), you can manage groups and tasks:
+
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
@@ -139,6 +141,7 @@ Users then run `/add-telegram` on their fork and get clean code that does exactl
 Skills we'd like to see:
 
 **Communication Channels**
+
 - `/add-signal` - Add Signal as a channel
 
 ## Requirements
@@ -157,12 +160,16 @@ Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Respon
 Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Per-group message queue with concurrency control. IPC via filesystem.
 
 Current local forks often carry additional seams for session persistence, IPC handling, security policy, and upstream merge hardening. For the current checked-in module map, see [ARCHITECTURE.md](ARCHITECTURE.md). For upstream concepts, see the [documentation site](https://docs.nanoclaw.dev/concepts/architecture).
+For contributor-facing extension points, see [docs/EXTENDING.md](docs/EXTENDING.md).
 
 Key files:
+
 - `src/index.ts` - Startup composition root
+- `src/bootstrap/start-app.ts` - Host bootstrap composition
 - `src/app-runtime-state.ts` - Persisted runtime state and registered groups
 - `src/app-processing.ts` - Message-loop and per-chat processing adapters
 - `src/channels/registry.ts` - Channel registry (self-registration at startup)
+- `src/agent-backends.ts` - Host-side agent backend catalog
 - `src/ipc.ts` - Thin IPC barrel
 - `src/ipc-watcher.ts` - IPC transport loop
 - `src/router.ts` - Message formatting and outbound routing
@@ -171,7 +178,20 @@ Key files:
 - `src/container-runner.ts` - Spawns streaming agent containers
 - `src/task-scheduler.ts` - Runs scheduled tasks
 - `src/db.ts` - SQLite operations (messages, groups, sessions, state)
+- `setup/steps.ts` - Setup step registry and CLI help surface
 - `groups/*/CLAUDE.md` - Per-group memory
+
+## Extension Points
+
+- Channels: add adapters in `src/channels/` and register them through `src/channels/registry.ts`
+- Agent backends: add host metadata in `src/agent-backends.ts` and container providers in `container/agent-runner/src/providers/`
+- Setup flow: add steps in `setup/` and register them in `setup/steps.ts`
+
+You can inspect the current setup surface with:
+
+```bash
+npm run setup -- --list
+```
 
 ## FAQ
 
@@ -221,6 +241,7 @@ OPENAI_API_KEY=your-openai-key-here
 ```
 
 This OpenAI backend is useful when your Claude Code quota is constrained or when you want to switch models quickly, but it is not yet feature-parity with the Claude backend:
+
 - Claude remains the full NanoClaw agent path with Claude Code tools, MCP integration, agent teams, and native session resumption.
 - The OpenAI backend currently provides text-only turns with per-group conversation persistence, which is enough to prove the backend abstraction and support model switching.
 
@@ -244,6 +265,7 @@ gcloud auth print-access-token
 ```
 
 The new tools are:
+
 - `list_notebooklm_notebooks`
 - `create_notebooklm_notebook`
 - `get_notebooklm_notebook`

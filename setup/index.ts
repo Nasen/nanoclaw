@@ -4,30 +4,23 @@
  */
 import { logger } from '../src/logger.js';
 import { emitStatus } from './status.js';
-
-const STEPS: Record<
-  string,
-  () => Promise<{ run: (args: string[]) => Promise<void> }>
-> = {
-  timezone: () => import('./timezone.js'),
-  environment: () => import('./environment.js'),
-  container: () => import('./container.js'),
-  'git-auth': () => import('./git-auth.js'),
-  groups: () => import('./groups.js'),
-  register: () => import('./register.js'),
-  mounts: () => import('./mounts.js'),
-  service: () => import('./service.js'),
-  verify: () => import('./verify.js'),
-};
+import { formatSetupUsage, getSetupStep } from './steps.js';
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  if (
+    args.includes('--help') ||
+    args.includes('-h') ||
+    args.includes('--list')
+  ) {
+    console.error(formatSetupUsage());
+    process.exit(0);
+  }
+
   const stepIdx = args.indexOf('--step');
 
   if (stepIdx === -1 || !args[stepIdx + 1]) {
-    console.error(
-      `Usage: npx tsx setup/index.ts --step <${Object.keys(STEPS).join('|')}> [args...]`,
-    );
+    console.error(formatSetupUsage());
     process.exit(1);
   }
 
@@ -36,15 +29,15 @@ async function main(): Promise<void> {
     (a, i) => i !== stepIdx && i !== stepIdx + 1 && a !== '--',
   );
 
-  const loader = STEPS[stepName];
-  if (!loader) {
+  const step = getSetupStep(stepName);
+  if (!step) {
     console.error(`Unknown step: ${stepName}`);
-    console.error(`Available steps: ${Object.keys(STEPS).join(', ')}`);
+    console.error(formatSetupUsage());
     process.exit(1);
   }
 
   try {
-    const mod = await loader();
+    const mod = await step.load();
     await mod.run(stepArgs);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -388,4 +388,9 @@ export class WhatsAppChannel implements Channel {
   }
 }
 
-registerChannel('whatsapp', (opts: ChannelOpts) => new WhatsAppChannel(opts));
+registerChannel({
+  name: 'whatsapp',
+  displayName: 'WhatsApp',
+  description: 'WhatsApp Web channel adapter using stored device auth',
+  factory: (opts: ChannelOpts) => new WhatsAppChannel(opts),
+});

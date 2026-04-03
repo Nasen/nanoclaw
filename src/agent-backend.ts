@@ -1,19 +1,17 @@
 import { readEnvFile } from './env.js';
+import {
+  AgentBackend,
+  AgentBackendConfig,
+  CredentialAuthMode,
+  getAgentBackendDefinition,
+} from './agent-backends.js';
 
-export type AgentBackend = 'claude' | 'openai';
-export type CredentialAuthMode = 'api-key' | 'oauth';
-
-export interface AgentBackendConfig {
-  backend: AgentBackend;
-  model?: string;
-  upstreamBaseUrl: string;
-  containerBaseUrlEnvVar: 'ANTHROPIC_BASE_URL' | 'OPENAI_BASE_URL';
-  containerCredentialEnvVar:
-    | 'ANTHROPIC_API_KEY'
-    | 'CLAUDE_CODE_OAUTH_TOKEN'
-    | 'OPENAI_API_KEY';
-  authMode: CredentialAuthMode;
-}
+export type { AgentBackend, AgentBackendConfig, CredentialAuthMode };
+export {
+  getAgentBackendDefinition,
+  getSupportedAgentBackendNames,
+  listSupportedAgentBackends,
+} from './agent-backends.js';
 
 export function getAgentBackendConfig(): AgentBackendConfig {
   const env = readEnvFile([
@@ -33,41 +31,10 @@ export function getAgentBackendConfig(): AgentBackendConfig {
     env.AGENT_BACKEND ||
     'claude'
   ).toLowerCase();
-
-  if (requestedBackend === 'openai') {
-    return {
-      backend: 'openai',
-      model: process.env.AGENT_MODEL || env.AGENT_MODEL || env.OPENAI_MODEL,
-      upstreamBaseUrl:
-        process.env.OPENAI_BASE_URL ||
-        env.OPENAI_BASE_URL ||
-        'https://api.openai.com/v1',
-      containerBaseUrlEnvVar: 'OPENAI_BASE_URL',
-      containerCredentialEnvVar: 'OPENAI_API_KEY',
-      authMode: 'api-key',
-    };
-  }
-
-  if (requestedBackend !== 'claude') {
-    throw new Error(
-      `Unsupported AGENT_BACKEND "${requestedBackend}". Expected "claude" or "openai".`,
-    );
-  }
+  const definition = getAgentBackendDefinition(requestedBackend);
 
   return {
-    backend: 'claude',
-    upstreamBaseUrl:
-      process.env.ANTHROPIC_BASE_URL ||
-      env.ANTHROPIC_BASE_URL ||
-      'https://api.anthropic.com',
-    containerBaseUrlEnvVar: 'ANTHROPIC_BASE_URL',
-    containerCredentialEnvVar:
-      process.env.ANTHROPIC_API_KEY || env.ANTHROPIC_API_KEY
-        ? 'ANTHROPIC_API_KEY'
-        : 'CLAUDE_CODE_OAUTH_TOKEN',
-    authMode:
-      process.env.ANTHROPIC_API_KEY || env.ANTHROPIC_API_KEY
-        ? 'api-key'
-        : 'oauth',
+    backend: definition.name,
+    ...definition.resolveConfig(env),
   };
 }

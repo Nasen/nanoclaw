@@ -291,11 +291,17 @@ export class SlackChannel implements Channel {
   }
 }
 
-registerChannel('slack', (opts: ChannelOpts) => {
-  const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
-  if (!env.SLACK_BOT_TOKEN || !env.SLACK_APP_TOKEN) {
-    logger.warn('Slack: SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set');
-    return null;
-  }
-  return new SlackChannel(opts);
+registerChannel({
+  name: 'slack',
+  displayName: 'Slack',
+  description: 'Slack Socket Mode channel adapter',
+  requiredEnvVars: ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
+  factory: (opts: ChannelOpts) => {
+    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    if (!env.SLACK_BOT_TOKEN || !env.SLACK_APP_TOKEN) {
+      logger.warn('Slack: SLACK_BOT_TOKEN or SLACK_APP_TOKEN not set');
+      return null;
+    }
+    return new SlackChannel(opts);
+  },
 });

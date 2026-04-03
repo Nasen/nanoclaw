@@ -1,5 +1,6 @@
 import {
   getChannelFactory,
+  getRegisteredChannels,
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import { RingCentralChannel } from './channels/ringcentral.js';
@@ -21,13 +22,15 @@ export async function connectInstalledChannels(
   channels: Channel[],
   channelOpts: ChannelOpts,
 ): Promise<void> {
-  for (const channelName of getRegisteredChannelNames()) {
-    const factory = getChannelFactory(channelName)!;
-    const channel = factory(channelOpts);
+  for (const registration of getRegisteredChannels()) {
+    const channel = registration.factory(channelOpts);
     if (!channel) {
       logger.warn(
-        { channel: channelName },
-        'Channel installed but credentials missing — skipping. Check .env or re-run the channel skill.',
+        {
+          channel: registration.name,
+          requiredEnvVars: registration.requiredEnvVars,
+        },
+        'Channel installed but not configured — skipping. Check its required env vars or re-run the channel skill.',
       );
       continue;
     }
