@@ -10,6 +10,8 @@ import {
   getRegisteredGroup,
   getTaskById,
   setRegisteredGroup,
+  storeChatMetadata,
+  storeMessageDirect,
 } from './db.js';
 import { processTaskIpc } from './ipc.js';
 import type { IpcDeps } from './ipc.js';
@@ -1103,5 +1105,397 @@ describe('NotebookLM IPC handlers', () => {
 
     expect(response.ok).toBe(false);
     expect(response.error).toContain('NotebookLM tools are restricted');
+  });
+});
+
+describe('Durable memory IPC handler', () => {
+  it('writes bounded durable memory into the current group folder', async () => {
+    const groupDir = path.join(process.cwd(), 'groups', 'whatsapp_main');
+    fs.mkdirSync(groupDir, { recursive: true });
+
+    try {
+      await processTaskIpc(
+        {
+          type: 'manage_memory',
+          target: 'memory',
+          title: 'Deploy rule',
+          content: 'Rebuild the exact CONTAINER_IMAGE tag before restart.',
+          requestId: 'memory-write',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const filePath = path.join(groupDir, 'MEMORY.md');
+      const responsePath = path.join(
+        DATA_DIR,
+        'ipc',
+        'whatsapp_main',
+        'responses',
+        'memory-write.json',
+      );
+      const response = JSON.parse(fs.readFileSync(responsePath, 'utf-8')) as {
+        ok: boolean;
+        fileName?: string;
+        updated?: boolean;
+      };
+
+      expect(fs.readFileSync(filePath, 'utf-8')).toContain(
+        '**Deploy rule**: Rebuild the exact CONTAINER_IMAGE tag before restart.',
+      );
+      expect(response).toMatchObject({
+        ok: true,
+        fileName: 'MEMORY.md',
+        updated: true,
+      });
+    } finally {
+      fs.rmSync(path.join(groupDir, 'MEMORY.md'), { force: true });
+      fs.rmSync(path.join(groupDir, 'USER.md'), { force: true });
+    }
+  });
+
+  it('blocks durable memory writes from groups without tool access', async () => {
+    await processTaskIpc(
+      {
+        type: 'manage_memory',
+        target: 'memory',
+        title: 'Blocked',
+        content: 'This should not be written.',
+        requestId: 'memory-blocked',
+      },
+      'other-group',
+      false,
+      deps,
+    );
+
+    const response = JSON.parse(
+      fs.readFileSync(
+        path.join(
+          DATA_DIR,
+          'ipc',
+          'other-group',
+          'responses',
+          'memory-blocked.json',
+        ),
+        'utf-8',
+      ),
+    ) as { ok: boolean; error?: string };
+
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('manage_memory');
+  });
+});
+
+describe('Search and runbook IPC handlers', () => {
+  it('searches current-group memory and archived sessions after indexing', async () => {
+    const groupDir = path.join(process.cwd(), 'groups', 'whatsapp_main');
+    const conversationsDir = path.join(groupDir, 'conversations');
+    fs.mkdirSync(conversationsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(groupDir, 'MEMORY.md'),
+      '# MEMORY\n\n- [2026-04-10T00:00:00.000Z] **Deploy rule**: Rebuild the exact container image tag before restart.\n',
+    );
+    fs.writeFileSync(
+      path.join(conversationsDir, '2026-04-10-rollout.md'),
+      '# Rollout Discussion\n\nWe investigated a deploy rollback after image drift.\n',
+    );
+
+    try {
+      await processTaskIpc(
+        {
+          type: 'search_memory',
+          query: 'container image',
+          requestId: 'memory-search',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      await processTaskIpc(
+        {
+          type: 'search_sessions',
+          query: 'deploy rollback',
+          requestId: 'session-search',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const memoryResponse = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            DATA_DIR,
+            'ipc',
+            'whatsapp_main',
+            'responses',
+            'memory-search.json',
+          ),
+          'utf-8',
+        ),
+      ) as {
+        ok: boolean;
+        results?: Array<{ doc_type: string; title: string }>;
+      };
+      const sessionResponse = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            DATA_DIR,
+            'ipc',
+            'whatsapp_main',
+            'responses',
+            'session-search.json',
+          ),
+          'utf-8',
+        ),
+      ) as {
+        ok: boolean;
+        results?: Array<{ doc_type: string; title: string }>;
+      };
+
+      expect(memoryResponse.ok).toBe(true);
+      expect(memoryResponse.results?.[0]?.doc_type).toBe('memory');
+      expect(sessionResponse.ok).toBe(true);
+      expect(sessionResponse.results?.[0]?.doc_type).toBe('conversation');
+    } finally {
+      fs.rmSync(path.join(groupDir, 'MEMORY.md'), { force: true });
+      fs.rmSync(path.join(conversationsDir, '2026-04-10-rollout.md'), {
+        force: true,
+      });
+      fs.rmSync(conversationsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('searches the current chat history through FTS', async () => {
+    storeChatMetadata(
+      'main@g.us',
+      '2026-04-10T00:00:00.000Z',
+      'Main Group Chat',
+    );
+    storeMessageDirect({
+      id: 'history-1',
+      chat_jid: 'main@g.us',
+      sender: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'Please rebuild the exact container image tag before restart.',
+      timestamp: '2026-04-10T00:00:01.000Z',
+      is_from_me: false,
+    });
+
+    await processTaskIpc(
+      {
+        type: 'search_group_history',
+        query: 'container image',
+        requestId: 'history-search',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const response = JSON.parse(
+      fs.readFileSync(
+        path.join(
+          DATA_DIR,
+          'ipc',
+          'whatsapp_main',
+          'responses',
+          'history-search.json',
+        ),
+        'utf-8',
+      ),
+    ) as {
+      ok: boolean;
+      chatJid?: string;
+      results?: Array<{ content: string }>;
+    };
+
+    expect(response.ok).toBe(true);
+    expect(response.chatJid).toBe('main@g.us');
+    expect(response.results?.[0]?.content).toContain('container image tag');
+  });
+
+  it('writes runbooks and skill-candidate drafts for the current group', async () => {
+    const groupDir = path.join(process.cwd(), 'groups', 'whatsapp_main');
+    const runbooksDir = path.join(groupDir, 'runbooks');
+
+    try {
+      await processTaskIpc(
+        {
+          type: 'manage_runbook',
+          kind: 'skill_candidate',
+          title: 'Deploy recovery',
+          summary: 'Draft steps for deploy rollback investigation.',
+          content:
+            '1. Verify the image tag.\n2. Rebuild the exact container image.\n',
+          requestId: 'runbook-write',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const response = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            DATA_DIR,
+            'ipc',
+            'whatsapp_main',
+            'responses',
+            'runbook-write.json',
+          ),
+          'utf-8',
+        ),
+      ) as { ok: boolean; kind?: string; relativePath?: string };
+
+      expect(response).toMatchObject({
+        ok: true,
+        kind: 'skill_candidate',
+      });
+      expect(response.relativePath).toBe(
+        path.join('skill-candidates', 'deploy-recovery.md'),
+      );
+      expect(
+        fs.readFileSync(
+          path.join(runbooksDir, 'skill-candidates', 'deploy-recovery.md'),
+          'utf-8',
+        ),
+      ).toContain('# Deploy recovery');
+      expect(
+        fs.readFileSync(path.join(runbooksDir, 'index.md'), 'utf-8'),
+      ).toContain('`skill-candidates/deploy-recovery.md`');
+    } finally {
+      fs.rmSync(runbooksDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reviews memory health and promotes a skill candidate into a runbook', async () => {
+    const groupDir = path.join(process.cwd(), 'groups', 'whatsapp_main');
+    const runbooksDir = path.join(groupDir, 'runbooks');
+
+    try {
+      await processTaskIpc(
+        {
+          type: 'manage_runbook',
+          kind: 'skill_candidate',
+          title: 'Incident triage',
+          summary: 'Draft incident triage checklist.',
+          content: '1. Confirm impact.\n2. Check rollback path.\n',
+          requestId: 'candidate-write',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      fs.writeFileSync(
+        path.join(groupDir, 'WORKING_MEMORY.md'),
+        '# WORKING MEMORY\n\nRecent triage context.\n',
+        'utf-8',
+      );
+      fs.utimesSync(
+        path.join(groupDir, 'WORKING_MEMORY.md'),
+        new Date('2026-03-01T00:00:00.000Z'),
+        new Date('2026-03-01T00:00:00.000Z'),
+      );
+
+      await processTaskIpc(
+        {
+          type: 'review_memory',
+          limit: 5,
+          requestId: 'memory-review',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const reviewResponse = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            DATA_DIR,
+            'ipc',
+            'whatsapp_main',
+            'responses',
+            'memory-review.json',
+          ),
+          'utf-8',
+        ),
+      ) as {
+        ok: boolean;
+        review?: {
+          staleDocuments: Array<{ doc_type: string }>;
+          skillCandidates: Array<{ relativePath?: string; doc_type: string }>;
+          recentEvents: Array<{ event_type: string }>;
+        };
+      };
+
+      expect(reviewResponse.ok).toBe(true);
+      expect(
+        reviewResponse.review?.staleDocuments.some(
+          (doc) => doc.doc_type === 'working_memory',
+        ),
+      ).toBe(true);
+      expect(
+        reviewResponse.review?.skillCandidates.some(
+          (doc) => doc.doc_type === 'skill_candidate',
+        ),
+      ).toBe(true);
+      expect(
+        reviewResponse.review?.recentEvents.map((event) => event.event_type),
+      ).toContain('runbook_write');
+
+      await processTaskIpc(
+        {
+          type: 'manage_runbook',
+          action: 'promote',
+          candidatePath: 'skill-candidates/incident-triage.md',
+          title: 'Incident triage',
+          summary: 'Approved incident triage checklist.',
+          requestId: 'candidate-promote',
+        },
+        'whatsapp_main',
+        true,
+        deps,
+      );
+
+      const promoteResponse = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            DATA_DIR,
+            'ipc',
+            'whatsapp_main',
+            'responses',
+            'candidate-promote.json',
+          ),
+          'utf-8',
+        ),
+      ) as {
+        ok: boolean;
+        action?: string;
+        relativePath?: string;
+        sourceRelativePath?: string;
+      };
+
+      expect(promoteResponse).toMatchObject({
+        ok: true,
+        action: 'promote',
+        relativePath: 'incident-triage.md',
+        sourceRelativePath: 'skill-candidates/incident-triage.md',
+      });
+      expect(
+        fs.existsSync(
+          path.join(runbooksDir, 'skill-candidates', 'incident-triage.md'),
+        ),
+      ).toBe(false);
+      expect(fs.existsSync(path.join(runbooksDir, 'incident-triage.md'))).toBe(
+        true,
+      );
+    } finally {
+      fs.rmSync(path.join(groupDir, 'WORKING_MEMORY.md'), { force: true });
+      fs.rmSync(runbooksDir, { recursive: true, force: true });
+    }
   });
 });

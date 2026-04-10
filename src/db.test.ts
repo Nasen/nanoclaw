@@ -12,8 +12,14 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  recordMemoryEvent,
+  reviewGroupMemoryState,
+  searchChatHistory,
+  searchGroupDocuments,
   setRegisteredGroup,
   storeChatMetadata,
+  storeMessageDirect,
+  upsertGroupDocument,
   storeMessage,
   updateTask,
 } from './db.js';
@@ -638,5 +644,116 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+describe('search indexes', () => {
+  it('searches current chat history through messages FTS', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z', 'Group Chat');
+    storeMessageDirect({
+      id: 'search-1',
+      chat_jid: 'group@g.us',
+      sender: 'alice@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'We need to rebuild the exact container image tag.',
+      timestamp: '2024-01-01T00:00:05.000Z',
+      is_from_me: false,
+    });
+
+    const results = searchChatHistory('container image', {
+      chatJid: 'group@g.us',
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toContain('container image tag');
+    expect(results[0].chat_name).toBe('Group Chat');
+  });
+
+  it('searches indexed group documents by type', () => {
+    upsertGroupDocument({
+      path: '/tmp/MEMORY.md',
+      group_folder: 'other-group',
+      doc_type: 'memory',
+      title: 'Deploy rule',
+      content: 'Rebuild the exact CONTAINER_IMAGE tag before restart.',
+      updated_at: '2026-04-10T00:00:00.000Z',
+      mtime_ms: 1,
+    });
+    upsertGroupDocument({
+      path: '/tmp/conversation.md',
+      group_folder: 'other-group',
+      doc_type: 'conversation',
+      title: 'Conversation',
+      content: 'We discussed a deploy rollback and image drift.',
+      updated_at: '2026-04-10T00:00:00.000Z',
+      mtime_ms: 2,
+    });
+
+    const memoryResults = searchGroupDocuments('container image', {
+      groupFolder: 'other-group',
+      docTypes: ['memory'],
+    });
+    const sessionResults = searchGroupDocuments('rollback', {
+      groupFolder: 'other-group',
+      docTypes: ['conversation'],
+    });
+
+    expect(memoryResults).toHaveLength(1);
+    expect(memoryResults[0].doc_type).toBe('memory');
+    expect(sessionResults).toHaveLength(1);
+    expect(sessionResults[0].doc_type).toBe('conversation');
+  });
+
+  it('falls back to substring search and returns review state with memory events', () => {
+    upsertGroupDocument({
+      path: '/tmp/skill-candidates/deploy-recovery.md',
+      group_folder: 'other-group',
+      doc_type: 'skill_candidate',
+      title: 'Deploy recovery',
+      content: 'Rollback checklist for image drift and release recovery.',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      mtime_ms: 3,
+    });
+    upsertGroupDocument({
+      path: '/tmp/WORKING_MEMORY.md',
+      group_folder: 'other-group',
+      doc_type: 'working_memory',
+      title: 'Working memory',
+      content: 'Recent deploy issue under investigation.',
+      updated_at: '2026-04-01T00:00:00.000Z',
+      mtime_ms: 4,
+    });
+    recordMemoryEvent({
+      groupFolder: 'other-group',
+      eventType: 'search_memory',
+      query: 'rollback',
+      createdAt: '2026-04-10T00:00:00.000Z',
+    });
+    recordMemoryEvent({
+      groupFolder: 'other-group',
+      eventType: 'runbook_write',
+      target: 'skill_candidate',
+      createdAt: '2026-04-10T01:00:00.000Z',
+    });
+
+    const fallbackResults = searchGroupDocuments('rollback checklist', {
+      groupFolder: 'other-group',
+      docTypes: ['skill_candidate'],
+    });
+    const review = reviewGroupMemoryState('other-group', {
+      limit: 5,
+      now: new Date('2026-04-10T00:00:00.000Z'),
+    });
+
+    expect(fallbackResults).toHaveLength(1);
+    expect(fallbackResults[0].snippet.toLowerCase()).toContain('rollback');
+    expect(fallbackResults[0].snippet.toLowerCase()).toContain('checklist');
+    expect(review.skillCandidates).toHaveLength(1);
+    expect(review.recentEvents.map((event) => event.event_type)).toEqual(
+      expect.arrayContaining(['search_memory', 'runbook_write']),
+    );
+    expect(review.staleDocuments.map((doc) => doc.doc_type)).toContain(
+      'skill_candidate',
+    );
   });
 });

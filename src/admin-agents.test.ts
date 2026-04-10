@@ -20,6 +20,9 @@ describe('admin agent profiles', () => {
     expect(hasAdminAgentToolAccess('rc-personal', 'delegate_to_group')).toBe(
       true,
     );
+    expect(hasAdminAgentToolAccess('rc-personal', 'search_memory')).toBe(true);
+    expect(hasAdminAgentToolAccess('rc-personal', 'review_memory')).toBe(true);
+    expect(hasAdminAgentToolAccess('rc-personal', 'manage_runbook')).toBe(true);
     expect(hasAdminAgentToolAccess('rc-personal', 'send_rc_message')).toBe(
       true,
     );
@@ -39,6 +42,12 @@ describe('admin agent profiles', () => {
     expect(profile?.externalMcpCapabilities).toContain('gitlab');
     expect(
       hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'delegate_to_group'),
+    ).toBe(true);
+    expect(
+      hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'search_sessions'),
+    ).toBe(true);
+    expect(
+      hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'review_memory'),
     ).toBe(true);
     expect(
       hasAdminAgentToolAccess('rc-grp-nanoclaw-gitops', 'send_rc_message'),
