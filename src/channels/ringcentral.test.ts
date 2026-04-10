@@ -198,6 +198,22 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
     });
 
     const platform = {
+      post: vi.fn(async (path: string, body?: unknown) => {
+        if (path === '/team-messaging/v1/conversations') {
+          expect(body).toEqual({
+            members: [{ id: '7001' }],
+          });
+          return {
+            json: async () => ({
+              id: '99001',
+              type: 'Direct',
+              members: [{ id: '7001' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
       get: vi.fn(async (path: string) => {
         if (path === '/restapi/v1.0/account/~/directory/entries') {
           return {
@@ -277,20 +293,26 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
         },
       ],
     });
+
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/conversations',
+      {
+        members: [{ id: '7001' }],
+      },
+    );
   });
 
   it('resolves a DM from local message history before RC chat search when reading messages', async () => {
-    storeChatMetadata('rc:77123', '2026-03-20T02:01:24.651Z');
     storeChatMetadata(
-      'rcb:139807227910',
+      'rc:77123',
       '2026-03-20T02:01:24.651Z',
-      'Jupiter-NC Automation Blade',
+      undefined,
       'rc',
-      true,
+      false,
     );
     storeMessage({
       id: 'jia-read-1',
-      chat_jid: 'rcb:139807227910',
+      chat_jid: 'rc:77123',
       sender: '4189132020',
       sender_name: 'Jia Zhang',
       content: 'hello from Jia',
@@ -309,6 +331,7 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
     });
 
     const platform = {
+      post: vi.fn(),
       get: vi.fn(async (path: string) => {
         if (path === '/team-messaging/v1/chats/77123') {
           return {
@@ -379,6 +402,7 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
       '/restapi/v1.0/account/~/directory/entries',
       expect.anything(),
     );
+    expect(platform.post).not.toHaveBeenCalled();
   });
 
   it('hydrates opaque direct-chat names from the other member', async () => {
@@ -500,6 +524,195 @@ describe('RingCentralChannel.readMessagesForAgent', () => {
     await expect(
       channel.readMessagesForAgent('140855713798', 5),
     ).rejects.toThrow('Request rate exceeded.');
+  });
+
+  it('returns a not-found error for unresolved person-name lookups', async () => {
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      get: vi.fn(async (path: string) => {
+        if (path === '/restapi/v1.0/account/~/directory/entries') {
+          return {
+            json: async () => ({
+              records: [],
+              paging: {
+                totalPages: 1,
+              },
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats') {
+          return {
+            json: async () => ({
+              records: [],
+              navigation: {},
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/teams') {
+          return {
+            json: async () => ({
+              records: [],
+              navigation: {},
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected path: ${path}`);
+      }),
+      post: vi.fn(),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+
+    await expect(channel.readMessagesForAgent('Coa Ke', 5)).rejects.toThrow(
+      'No RingCentral user or chat found for: Coa Ke',
+    );
+
+    expect(platform.post).not.toHaveBeenCalled();
+    expect(platform.get).not.toHaveBeenCalledWith(
+      '/team-messaging/v1/chats/Coa Ke',
+    );
+  });
+
+  it('forces an RC sync before giving up on an unresolved person-name lookup', async () => {
+    const channel = new RingCentralChannel({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+      creds: {
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        jwt: 'test-jwt',
+      },
+    });
+
+    const platform = {
+      get: vi.fn(async (path: string) => {
+        if (path === '/restapi/v1.0/account/~/directory/entries') {
+          return {
+            json: async () => ({
+              records: [],
+              paging: {
+                totalPages: 1,
+              },
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: '77123',
+                  type: 'Direct',
+                  members: [{ id: '4189132020' }, { id: '860412020' }],
+                },
+              ],
+              navigation: {},
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/teams') {
+          return {
+            json: async () => ({
+              records: [],
+              navigation: {},
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/77123') {
+          return {
+            json: async () => ({
+              id: '77123',
+              type: 'Direct',
+              members: [{ id: '4189132020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/persons/4189132020') {
+          return {
+            json: async () => ({
+              firstName: 'Coa',
+              lastName: 'Ke',
+            }),
+          };
+        }
+
+        if (path === '/team-messaging/v1/chats/77123/posts') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: 'post-coa-1',
+                  text: 'hello from Coa',
+                  creatorId: '4189132020',
+                  creationTime: '2026-04-10T05:00:00.000Z',
+                },
+              ],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected path: ${path}`);
+      }),
+      post: vi.fn(async (path: string) => {
+        if (path === '/restapi/v1.0/account/~/directory/entries') {
+          throw new Error(`Unexpected post path: ${path}`);
+        }
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
+    };
+
+    Object.assign(channel as object, {
+      platform,
+      botExtId: '860412020',
+    });
+    (
+      channel as unknown as { refreshPlatform: () => Promise<unknown> }
+    ).refreshPlatform = vi.fn(async () => platform);
+
+    await expect(
+      channel.readMessagesForAgent('Coa Ke', 5),
+    ).resolves.toMatchObject({
+      jid: 'rc:77123',
+      chatId: '77123',
+      name: 'Coa Ke',
+      messages: [
+        {
+          id: 'post-coa-1',
+          text: 'hello from Coa',
+          creatorName: 'Coa Ke',
+        },
+      ],
+    });
+
+    expect(platform.get).toHaveBeenCalledWith(
+      '/team-messaging/v1/chats',
+      expect.objectContaining({ recordCount: '250' }),
+    );
+    expect(platform.get).not.toHaveBeenCalledWith(
+      '/restapi/v1.0/account/~/directory/entries',
+      expect.anything(),
+    );
   });
 
   it('retries RC reads with a fresh platform when the long-lived client returns 404', async () => {
@@ -1462,6 +1675,22 @@ describe('RingCentralChannel.listChatsForAgent', () => {
     });
 
     const platform = {
+      post: vi.fn(async (path: string, body?: unknown) => {
+        if (path === '/team-messaging/v1/conversations') {
+          expect(body).toEqual({
+            members: [{ id: '7001' }],
+          });
+          return {
+            json: async () => ({
+              id: '99001',
+              type: 'Direct',
+              members: [{ id: '7001' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
       get: vi.fn(async (path: string) => {
         if (path === '/restapi/v1.0/account/~/directory/entries') {
           return {
@@ -1528,6 +1757,12 @@ describe('RingCentralChannel.listChatsForAgent', () => {
         }),
       ]),
     );
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/conversations',
+      {
+        members: [{ id: '7001' }],
+      },
+    );
   });
 
   it('finds opaque cached direct chats by hydrated member name', async () => {
@@ -1545,7 +1780,42 @@ describe('RingCentralChannel.listChatsForAgent', () => {
     });
 
     const platform = {
+      post: vi.fn(async (path: string, body?: unknown) => {
+        if (path === '/team-messaging/v1/conversations') {
+          expect(body).toEqual({
+            members: [{ id: '558463020' }],
+          });
+          return {
+            json: async () => ({
+              id: '14838513666',
+              type: 'Direct',
+              members: [{ id: '558463020' }, { id: '860412020' }],
+            }),
+          };
+        }
+
+        throw new Error(`Unexpected post path: ${path}`);
+      }),
       get: vi.fn(async (path: string) => {
+        if (path === '/restapi/v1.0/account/~/directory/entries') {
+          return {
+            json: async () => ({
+              records: [
+                {
+                  id: '558463020',
+                  firstName: 'Ian',
+                  lastName: 'Zhang',
+                  status: 'Enabled',
+                  email: 'ian.zhang@ringcentral.com',
+                },
+              ],
+              paging: {
+                totalPages: 1,
+              },
+            }),
+          };
+        }
+
         if (path === '/team-messaging/v1/chats') {
           return {
             json: async () => ({
@@ -1605,6 +1875,12 @@ describe('RingCentralChannel.listChatsForAgent', () => {
           name: 'Ian Zhang',
         }),
       ]),
+    );
+    expect(platform.post).toHaveBeenCalledWith(
+      '/team-messaging/v1/conversations',
+      {
+        members: [{ id: '558463020' }],
+      },
     );
   });
 

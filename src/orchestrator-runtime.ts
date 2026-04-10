@@ -29,6 +29,9 @@ import { GroupQueue } from './group-queue.js';
 
 type RegisteredGroupsGetter = () => Record<string, RegisteredGroup>;
 type AvailableGroupsGetter = () => AvailableGroup[];
+type RcConcreteMode = Exclude<RcDeliveryMode, 'auto'>;
+
+const rcModeCooldownUntil = new Map<RcConcreteMode, number>();
 
 function getRcChannel(
   channels: Channel[],
@@ -50,10 +53,13 @@ function getRcChannel(
   return channel;
 }
 
-function getAlternateRcMode(mode: RcDeliveryMode): RcDeliveryMode | null {
+function normalizeRcMode(mode: RcDeliveryMode): RcConcreteMode {
+  return mode === 'bot' ? 'bot' : 'personal';
+}
+
+function getAlternateRcMode(mode: RcConcreteMode): RcConcreteMode {
   if (mode === 'personal') return 'bot';
-  if (mode === 'bot') return 'personal';
-  return null;
+  return 'personal';
 }
 
 function shouldRetryRcOnAlternateChannel(err: unknown): boolean {
@@ -67,28 +73,116 @@ function shouldRetryRcOnAlternateChannel(err: unknown): boolean {
   );
 }
 
+function getRcRetryAfterMs(err: unknown): number | null {
+  const retryAfter = (err as { retryAfter?: unknown })?.retryAfter;
+  const numericRetryAfter =
+    typeof retryAfter === 'number'
+      ? retryAfter
+      : typeof retryAfter === 'string' && retryAfter.trim()
+        ? Number(retryAfter)
+        : NaN;
+
+  if (!Number.isFinite(numericRetryAfter) || numericRetryAfter <= 0) {
+    return null;
+  }
+
+  return numericRetryAfter >= 1000
+    ? numericRetryAfter
+    : numericRetryAfter * 1000;
+}
+
+function rememberRcRateLimit(mode: RcConcreteMode, err: unknown): void {
+  const retryAfterMs = getRcRetryAfterMs(err);
+  if (!retryAfterMs) return;
+  rcModeCooldownUntil.set(mode, Date.now() + retryAfterMs);
+}
+
+function getRcModeCooldownMs(mode: RcConcreteMode): number {
+  const cooldownUntil = rcModeCooldownUntil.get(mode);
+  if (!cooldownUntil) return 0;
+  const remainingMs = cooldownUntil - Date.now();
+  if (remainingMs <= 0) {
+    rcModeCooldownUntil.delete(mode);
+    return 0;
+  }
+  return remainingMs;
+}
+
+function createRcRateLimitedError(
+  mode: RcConcreteMode,
+  remainingMs: number,
+): Error {
+  return new Error(
+    `RingCentral ${mode} channel is rate limited; retry after ${Math.ceil(remainingMs / 1000)}s`,
+  );
+}
+
+export function _resetRcCooldownsForTests(): void {
+  rcModeCooldownUntil.clear();
+}
+
 export async function listRcChats(
   channels: Channel[],
   mode: RcDeliveryMode,
   query?: string,
   limit?: number,
 ): Promise<RcChatSummary[]> {
-  try {
-    return await getRcChannel(channels, mode).listChatsForAgent(query, limit);
-  } catch (err) {
-    const alternateMode = getAlternateRcMode(mode);
-    if (!alternateMode || !shouldRetryRcOnAlternateChannel(err)) {
-      throw err;
+  const primaryMode = normalizeRcMode(mode);
+  const alternateMode = getAlternateRcMode(primaryMode);
+  const primaryCooldownMs = getRcModeCooldownMs(primaryMode);
+
+  if (primaryCooldownMs > 0) {
+    const alternateCooldownMs = getRcModeCooldownMs(alternateMode);
+    if (alternateCooldownMs > 0) {
+      throw createRcRateLimitedError(
+        primaryCooldownMs <= alternateCooldownMs ? primaryMode : alternateMode,
+        Math.min(primaryCooldownMs, alternateCooldownMs),
+      );
     }
 
-    logger.warn(
-      { mode, alternateMode, query, err },
-      'RC list chats failed on primary channel, retrying on alternate channel',
+    logger.info(
+      {
+        mode: primaryMode,
+        alternateMode,
+        query,
+        cooldownMs: primaryCooldownMs,
+      },
+      'RC primary channel cooling down, using alternate channel for chat listing',
     );
     return getRcChannel(channels, alternateMode).listChatsForAgent(
       query,
       limit,
     );
+  }
+
+  try {
+    return await getRcChannel(channels, primaryMode).listChatsForAgent(
+      query,
+      limit,
+    );
+  } catch (err) {
+    rememberRcRateLimit(primaryMode, err);
+    if (!shouldRetryRcOnAlternateChannel(err)) {
+      throw err;
+    }
+    const alternateCooldownMs = getRcModeCooldownMs(alternateMode);
+    if (alternateCooldownMs > 0) {
+      throw createRcRateLimitedError(alternateMode, alternateCooldownMs);
+    }
+
+    logger.warn(
+      { mode: primaryMode, alternateMode, query, err },
+      'RC list chats failed on primary channel, retrying on alternate channel',
+    );
+    try {
+      return await getRcChannel(channels, alternateMode).listChatsForAgent(
+        query,
+        limit,
+      );
+    } catch (alternateErr) {
+      rememberRcRateLimit(alternateMode, alternateErr);
+      throw alternateErr;
+    }
   }
 }
 
@@ -98,25 +192,62 @@ export async function readRcMessages(
   mode: RcDeliveryMode,
   limit?: number,
 ): Promise<RcChatTranscript> {
-  try {
-    return await getRcChannel(channels, mode).readMessagesForAgent(
-      chatRef,
-      limit,
-    );
-  } catch (err) {
-    const alternateMode = getAlternateRcMode(mode);
-    if (!alternateMode || !shouldRetryRcOnAlternateChannel(err)) {
-      throw err;
+  const primaryMode = normalizeRcMode(mode);
+  const alternateMode = getAlternateRcMode(primaryMode);
+  const primaryCooldownMs = getRcModeCooldownMs(primaryMode);
+
+  if (primaryCooldownMs > 0) {
+    const alternateCooldownMs = getRcModeCooldownMs(alternateMode);
+    if (alternateCooldownMs > 0) {
+      throw createRcRateLimitedError(
+        primaryCooldownMs <= alternateCooldownMs ? primaryMode : alternateMode,
+        Math.min(primaryCooldownMs, alternateCooldownMs),
+      );
     }
 
-    logger.warn(
-      { mode, alternateMode, chatRef, err },
-      'RC read messages failed on primary channel, retrying on alternate channel',
+    logger.info(
+      {
+        mode: primaryMode,
+        alternateMode,
+        chatRef,
+        cooldownMs: primaryCooldownMs,
+      },
+      'RC primary channel cooling down, using alternate channel for message reads',
     );
     return getRcChannel(channels, alternateMode).readMessagesForAgent(
       chatRef,
       limit,
     );
+  }
+
+  try {
+    return await getRcChannel(channels, primaryMode).readMessagesForAgent(
+      chatRef,
+      limit,
+    );
+  } catch (err) {
+    rememberRcRateLimit(primaryMode, err);
+    if (!shouldRetryRcOnAlternateChannel(err)) {
+      throw err;
+    }
+    const alternateCooldownMs = getRcModeCooldownMs(alternateMode);
+    if (alternateCooldownMs > 0) {
+      throw createRcRateLimitedError(alternateMode, alternateCooldownMs);
+    }
+
+    logger.warn(
+      { mode: primaryMode, alternateMode, chatRef, err },
+      'RC read messages failed on primary channel, retrying on alternate channel',
+    );
+    try {
+      return await getRcChannel(channels, alternateMode).readMessagesForAgent(
+        chatRef,
+        limit,
+      );
+    } catch (alternateErr) {
+      rememberRcRateLimit(alternateMode, alternateErr);
+      throw alternateErr;
+    }
   }
 }
 

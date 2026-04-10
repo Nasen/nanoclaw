@@ -25,6 +25,7 @@ const RcWsExtension = _require('@rc-ex/ws');
 
 import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import {
+  findChatsByParticipantName,
   findChatParticipantsByName,
   findChatsByPrefix,
   findChatsByQuery,
@@ -1371,6 +1372,26 @@ export class RingCentralChannel implements Channel {
     return this.resolveOpaqueDirectChatsByMemberIds(candidateNames, limit);
   }
 
+  private resolveLocalHistoryChat(query: string): RcChatSummary | undefined {
+    const localMatch = findChatsByParticipantName(query, {
+      jidPrefix: this.jidPrefix,
+      limit: 1,
+    })[0];
+    if (!localMatch) return undefined;
+
+    return {
+      jid: localMatch.chat_jid,
+      chatId: this.normalizeChatId(localMatch.chat_jid),
+      name: localMatch.sender_name || localMatch.chat_jid,
+    };
+  }
+
+  private resolveLocalKnownChat(query: string): RcChatSummary | undefined {
+    return (
+      this.findCachedChats(query, 1)[0] ?? this.resolveLocalHistoryChat(query)
+    );
+  }
+
   private async resolveDirectChatIdLookup(
     query: string,
   ): Promise<RcChatSummary | null> {
@@ -1393,6 +1414,14 @@ export class RingCentralChannel implements Channel {
     query?: string,
     limit = 50,
   ): Promise<RcChatSummary[]> {
+    return this.listChatsForAgentInternal(query, limit, false);
+  }
+
+  private async listChatsForAgentInternal(
+    query?: string,
+    limit = 50,
+    hasForcedSync = false,
+  ): Promise<RcChatSummary[]> {
     if (!this.platform) throw new Error('RC channel is not connected');
 
     const cappedLimit = Math.min(Math.max(limit, 1), 250);
@@ -1403,6 +1432,24 @@ export class RingCentralChannel implements Channel {
           await this.resolveDirectChatIdLookup(trimmedQuery);
         if (directIdMatch) {
           return [directIdMatch];
+        }
+      }
+
+      const localMatch = this.resolveLocalKnownChat(trimmedQuery);
+      if (localMatch) {
+        return [localMatch];
+      }
+
+      if (!hasForcedSync && !this.looksLikeChatId(trimmedQuery)) {
+        logger.info(
+          { query: trimmedQuery },
+          'RC local lookup missed, forcing chat metadata sync',
+        );
+        await this.syncGroups(true);
+
+        const syncedLocalMatch = this.resolveLocalKnownChat(trimmedQuery);
+        if (syncedLocalMatch) {
+          return [syncedLocalMatch];
         }
       }
 
@@ -1419,6 +1466,12 @@ export class RingCentralChannel implements Channel {
         return cachedChats.slice(0, cappedLimit);
       }
 
+      const directConversation =
+        await this.resolveConversationForPersonName(trimmedQuery);
+      if (directConversation) {
+        return [directConversation];
+      }
+
       const opaqueMatches = await this.searchOpaqueCachedChats(
         trimmedQuery,
         cappedLimit,
@@ -1433,6 +1486,10 @@ export class RingCentralChannel implements Channel {
       );
       if (directoryMatches.length > 0) {
         return directoryMatches;
+      }
+
+      if (!hasForcedSync && !this.looksLikeChatId(trimmedQuery)) {
+        return this.listChatsForAgentInternal(trimmedQuery, cappedLimit, true);
       }
     }
 
@@ -1482,7 +1539,8 @@ export class RingCentralChannel implements Channel {
     }
 
     return (
-      this.findCachedChats(trimmedRef, 1)[0] ??
+      this.resolveLocalKnownChat(trimmedRef) ??
+      (await this.resolveConversationForPersonName(trimmedRef)) ??
       (await this.searchOpaqueCachedChats(trimmedRef, 1))[0] ??
       (await this.resolveMessageHistoryDirectChats(trimmedRef, 1))[0] ??
       (await this.resolveDirectoryBackedDirectChats(trimmedRef, 1))[0]
@@ -1495,12 +1553,31 @@ export class RingCentralChannel implements Channel {
   ): Promise<RcChatTranscript> {
     if (!this.platform) throw new Error('RC channel is not connected');
 
-    const cachedChat =
-      (await this.resolveKnownChatForAgent(chatRef)) ??
-      (!this.looksLikeChatId(chatRef)
-        ? (await this.listChatsForAgent(chatRef, 1))[0]
-        : undefined);
-    const chatId = this.normalizeChatId(cachedChat?.jid ?? chatRef);
+    const trimmedRef = chatRef.trim();
+    const isDirectChatId = this.looksLikeChatId(trimmedRef);
+
+    let cachedChat = isDirectChatId
+      ? undefined
+      : this.resolveLocalKnownChat(trimmedRef);
+    if (!cachedChat && !isDirectChatId) {
+      logger.info(
+        { chatRef: trimmedRef },
+        'RC local read lookup missed, forcing chat metadata sync',
+      );
+      await this.syncGroups(true);
+      cachedChat = this.resolveLocalKnownChat(trimmedRef);
+    }
+    if (!cachedChat) {
+      cachedChat =
+        (await this.resolveKnownChatForAgent(trimmedRef)) ??
+        (!isDirectChatId
+          ? (await this.listChatsForAgentInternal(trimmedRef, 1, true))[0]
+          : undefined);
+    }
+    if (!cachedChat && !isDirectChatId) {
+      throw new Error(`No RingCentral user or chat found for: ${trimmedRef}`);
+    }
+    const chatId = this.normalizeChatId(cachedChat?.jid ?? trimmedRef);
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
     try {
       return await this.readTranscriptFromPlatform(
@@ -1867,23 +1944,43 @@ export class RingCentralChannel implements Channel {
 
   // ─── Chat metadata ──────────────────────────────────────────────────────────
 
-  async syncChatMetadata(): Promise<void> {
+  async syncGroups(force = false): Promise<void> {
+    await this.syncChatMetadata(force);
+  }
+
+  async syncChatMetadata(force = false): Promise<void> {
     if (!this.platform) return;
     try {
-      logger.info('Syncing RC chat metadata...');
+      logger.info({ force }, 'Syncing RC chat metadata...');
       const chats = await listChats(this.platform, {
         limit: 250,
+        fetchAll: force,
         suppressErrors: true,
       });
       let count = 0;
       for (const chat of chats) {
-        if (chat.id && chat.name) {
+        if (!chat.id) continue;
+        if (force) {
+          const summary = await this.buildChatSummary(
+            this.platform,
+            chat.id,
+            chat.name,
+            chat,
+          );
+          if (summary.name) {
+            updateChatName(summary.jid, summary.name);
+            count++;
+          }
+          continue;
+        }
+        if (chat.name) {
           updateChatName(`${this.jidPrefix}${chat.id}`, chat.name);
           count++;
         }
       }
       const teams = await listTeams(this.platform, {
         limit: 250,
+        fetchAll: force,
         suppressErrors: true,
       });
       for (const team of teams) {
