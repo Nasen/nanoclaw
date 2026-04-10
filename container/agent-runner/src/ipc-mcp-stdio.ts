@@ -428,6 +428,418 @@ registerTool(
 );
 
 registerTool(
+  'manage_memory',
+  {
+    description:
+      'Write a concise durable memory entry for the current group. Use target="memory" for stable group facts or reusable conventions. Use target="user" for stable user preferences or communication guidance for this group. Keep entries short and only record information that should persist across sessions.',
+    inputSchema: {
+      target: z
+        .enum(['memory', 'user'])
+        .describe('Which bounded durable memory file to update.'),
+      content: z.string().describe('The concise fact or preference to store.'),
+      title: z
+        .string()
+        .optional()
+        .describe('Optional short title for the memory entry.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'manage_memory',
+        {
+          target: args.target,
+          title: args.title,
+          content: args.content,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to update durable memory.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                target: response.target,
+                fileName: response.fileName,
+                updated: response.updated,
+                skippedDuplicate: response.skippedDuplicate === true,
+                entryCount: response.entryCount,
+                droppedEntries: response.droppedEntries,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
+  'search_memory',
+  {
+    description:
+      'Search the current group durable memory, working memory, and runbooks. Use this before guessing about prior decisions, stable conventions, or promoted workflows.',
+    inputSchema: {
+      query: z.string().describe('Search query for current-group memory.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .default(8)
+        .describe('Maximum results to return.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'search_memory',
+        {
+          query: args.query,
+          limit: args.limit,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to search memory.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.results ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
+  'search_sessions',
+  {
+    description:
+      'Search archived conversation markdown for the current group. Use this when you need cross-session recall instead of relying on raw provider session continuity.',
+    inputSchema: {
+      query: z
+        .string()
+        .describe('Search query for archived conversations in this group.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .default(8)
+        .describe('Maximum results to return.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'search_sessions',
+        {
+          query: args.query,
+          limit: args.limit,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to search sessions.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.results ?? [], null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
+  'search_group_history',
+  {
+    description:
+      'Search the stored message history for the current chat only. Use this for recent or exact recall from the active group conversation.',
+    inputSchema: {
+      query: z.string().describe('Search query for current chat history.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .default(8)
+        .describe('Maximum results to return.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'search_group_history',
+        {
+          query: args.query,
+          limit: args.limit,
+          chatJid,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(
+                response.error || 'Failed to search current group history.',
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                chatJid: response.chatJid,
+                results: response.results ?? [],
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
+  'review_memory',
+  {
+    description:
+      'Review the current group memory system health. Returns stale memory/runbook documents, current skill candidates, indexed document counts, and recent memory-related events.',
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .default(10)
+        .describe('Maximum stale documents and skill candidates to return.'),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'review_memory',
+        {
+          limit: args.limit,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to review memory state.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response.review ?? {}, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
+  'manage_runbook',
+  {
+    description:
+      'Create or update a current-group runbook or skill-candidate draft, or promote a skill candidate into a runbook after review.',
+    inputSchema: {
+      action: z
+        .enum(['upsert', 'promote'])
+        .default('upsert')
+        .describe('Whether to write a document or promote a skill candidate.'),
+      kind: z
+        .enum(['runbook', 'skill_candidate'])
+        .optional()
+        .describe('Required for action="upsert".'),
+      title: z.string().optional().describe('Runbook title.'),
+      content: z
+        .string()
+        .optional()
+        .describe('Markdown body content for action="upsert".'),
+      summary: z
+        .string()
+        .optional()
+        .describe('Optional one-line summary for the runbook index.'),
+      slug: z
+        .string()
+        .optional()
+        .describe('Optional custom slug for the output file name.'),
+      candidate_path: z
+        .string()
+        .optional()
+        .describe(
+          'Required for action="promote". Relative path like skill-candidates/deploy-recovery.md.',
+        ),
+    },
+  },
+  async (args) => {
+    try {
+      const response = await requestTask(
+        'manage_runbook',
+        {
+          action: args.action,
+          kind: args.kind,
+          title: args.title,
+          content: args.content,
+          summary: args.summary,
+          slug: args.slug,
+          candidatePath: args.candidate_path,
+        },
+        20000,
+      );
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: String(response.error || 'Failed to update runbook.'),
+            },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                action: response.action,
+                kind: response.kind,
+                relativePath: response.relativePath,
+                sourceRelativePath: response.sourceRelativePath,
+                updated: response.updated,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: err instanceof Error ? err.message : String(err),
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+registerTool(
   'delegate_to_group',
   {
     description:
@@ -435,7 +847,9 @@ registerTool(
     inputSchema: {
       target_group: z
         .string()
-        .describe('Target admin group folder, for example rc-grp-nanoclaw-jiraops.'),
+        .describe(
+          'Target admin group folder, for example rc-grp-nanoclaw-jiraops.',
+        ),
       task: z
         .string()
         .describe('The exact subtask for the target specialist agent.'),
@@ -446,7 +860,10 @@ registerTool(
     },
   },
   async (args) => {
-    if (allowedPeerGroups.size > 0 && !allowedPeerGroups.has(args.target_group)) {
+    if (
+      allowedPeerGroups.size > 0 &&
+      !allowedPeerGroups.has(args.target_group)
+    ) {
       return {
         content: [
           {

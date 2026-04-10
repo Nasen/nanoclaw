@@ -25,6 +25,8 @@ import {
   DEFAULT_MCP_STARTUP_TIMEOUT_MS,
   getOpenAiMcpServerConfigs,
 } from './mcp-registry.js';
+import { loadDurableMemoryPromptSections } from './durable-memory.js';
+import { updateWorkingMemoryFile } from './working-memory.js';
 
 interface OpenAIHistoryTurn {
   role: 'user' | 'assistant';
@@ -148,6 +150,18 @@ function saveSessionState(sessionId: string, state: OpenAISessionState): void {
   );
 }
 
+function persistSessionState(
+  sessionId: string,
+  state: OpenAISessionState,
+  summary?: string | null,
+): void {
+  saveSessionState(sessionId, state);
+  updateWorkingMemoryFile({
+    summary,
+    turns: trimSessionHistory(state.history || []),
+  });
+}
+
 function loadInstructionFile(filePath: string): string {
   if (!fs.existsSync(filePath)) return '';
   return fs.readFileSync(filePath, 'utf-8').trim();
@@ -202,7 +216,7 @@ function extractExplicitRcNamedTarget(prompt: string): string | null {
   }
 
   const bracketedMatch = prompt.match(
-    /\b(?:in|from|with|for)\s+(\[[^\]\n]+\](?:\s+[A-Za-z0-9&/_-]+){0,8})\s*(?:team|chat|group)?(?=$|[\s?.!,])/i,
+    /\b(?:in|from|with|for)\s+(\[[^\]\n]+\](?:\s+(?!team\b|chat\b|group\b)[A-Za-z0-9&/_-]+){0,8})\s*(?:team|chat|group)?(?=$|[\s?.!,])/i,
   );
   if (bracketedMatch?.[1]?.trim()) {
     return bracketedMatch[1].trim();
@@ -292,6 +306,10 @@ function buildPrompt(
     sections.push(groupContext);
   }
 
+  for (const memorySection of loadDurableMemoryPromptSections()) {
+    sections.push(memorySection);
+  }
+
   const extraDirsSummary = loadAdditionalDirectoriesSummary(
     !!context.containerInput.personalMode,
     context.agentEnv,
@@ -325,6 +343,7 @@ function buildPrompt(
     'Respond as the NanoClaw agent.',
     'You have working tools.',
     'Use shell for local file/command tasks, web_fetch for known URLs, and web_search when you need current web information.',
+    'Use search_memory for durable facts and runbooks, search_sessions for archived cross-session recall, search_group_history for exact recall from the current chat, and review_memory when deciding whether memory or runbooks need cleanup or promotion.',
     'The nanoclaw MCP send_message tool is available and works.',
     'Do not claim tools are unavailable.',
   ];
@@ -907,7 +926,7 @@ async function tryHandleDirectJiraIssueLookup(
 
     state.history.push({ role: 'user', content: context.prompt });
     state.history.push({ role: 'assistant', content: text });
-    saveSessionState(sessionId, state);
+    persistSessionState(sessionId, state, `Direct Jira lookup for ${issueKey}`);
 
     context.emitOutput({
       status: 'success',
@@ -1861,7 +1880,7 @@ async function runOpenAITurn(
         role: 'assistant',
         content: historyText,
       });
-      saveSessionState(sessionId, state);
+      persistSessionState(sessionId, state);
 
       context.emitOutput({
         status: 'success',
@@ -1885,7 +1904,7 @@ async function runOpenAITurn(
         role: 'assistant',
         content: transientMessage,
       });
-      saveSessionState(sessionId, state);
+      persistSessionState(sessionId, state);
       context.emitOutput({
         status: 'success',
         result: transientMessage,

@@ -7,6 +7,12 @@ import { RegisteredGroup } from './types.js';
 
 export type NanoclawToolName =
   | 'send_message'
+  | 'manage_memory'
+  | 'search_memory'
+  | 'search_sessions'
+  | 'search_group_history'
+  | 'review_memory'
+  | 'manage_runbook'
   | 'schedule_task'
   | 'list_tasks'
   | 'pause_task'
@@ -109,6 +115,15 @@ const TASK_TOOLS: NanoclawToolName[] = [
   'update_task',
 ];
 
+const MEMORY_TOOLS: NanoclawToolName[] = [
+  'manage_memory',
+  'search_memory',
+  'search_sessions',
+  'search_group_history',
+  'review_memory',
+  'manage_runbook',
+];
+
 const SUPERVISOR_ONLY_TOOLS: NanoclawToolName[] = [
   'register_group',
   'send_rc_message',
@@ -135,6 +150,7 @@ const PEOPLEOPS_RC_READ_TOOLS: NanoclawToolName[] = [
 const BASE_SPECIALIST_TOOLS: NanoclawToolName[] = [
   'send_message',
   'delegate_to_group',
+  ...MEMORY_TOOLS,
   ...TASK_TOOLS,
 ];
 
@@ -143,6 +159,7 @@ const TOOL_PROFILES: Record<ToolProfileId, ToolProfile> = {
     nanoclawTools: [
       'send_message',
       'delegate_to_group',
+      ...MEMORY_TOOLS,
       ...TASK_TOOLS,
       ...SUPERVISOR_ONLY_TOOLS,
       ...PEOPLEOPS_RC_READ_TOOLS,

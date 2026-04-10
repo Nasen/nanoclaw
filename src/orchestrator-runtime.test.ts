@@ -33,13 +33,11 @@ describe('orchestrator RC fallback', () => {
     const personal = createRcChannel('rc');
     const bot = createRcChannel('rc-bot');
 
-    const personalListChats = vi
-      .fn()
-      .mockRejectedValueOnce(
-        Object.assign(new Error('Request rate exceeded'), {
-          retryAfter: 60000,
-        }),
-      );
+    const personalListChats = vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error('Request rate exceeded'), {
+        retryAfter: 60000,
+      }),
+    );
     const botListChats = vi.fn().mockResolvedValue([
       {
         jid: 'rcb:123',
@@ -83,20 +81,16 @@ describe('orchestrator RC fallback', () => {
     const personal = createRcChannel('rc');
     const bot = createRcChannel('rc-bot');
 
-    const personalReadMessages = vi
-      .fn()
-      .mockRejectedValueOnce(
-        Object.assign(new Error('Request rate exceeded'), {
-          retryAfter: 60000,
-        }),
-      );
-    const botReadMessages = vi
-      .fn()
-      .mockRejectedValueOnce(
-        Object.assign(new Error('Request rate exceeded'), {
-          retryAfter: 60000,
-        }),
-      );
+    const personalReadMessages = vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error('Request rate exceeded'), {
+        retryAfter: 60000,
+      }),
+    );
+    const botReadMessages = vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error('Request rate exceeded'), {
+        retryAfter: 60000,
+      }),
+    );
 
     Object.assign(personal as object, {
       readMessagesForAgent: personalReadMessages,

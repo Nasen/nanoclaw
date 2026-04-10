@@ -12,6 +12,8 @@ import {
   getClaudeAllowedToolPatternsForContext,
   getClaudeMcpServers,
 } from './mcp-registry.js';
+import { loadDurableMemoryPromptSections } from './durable-memory.js';
+import { updateWorkingMemoryFile } from './working-memory.js';
 
 const IPC_POLL_MS = 500;
 const CONTAINER_GIT_CONFIG_PATH =
@@ -230,6 +232,10 @@ function createPreCompactHook(
         assistantName,
       );
       fs.writeFileSync(filePath, markdown);
+      updateWorkingMemoryFile({
+        summary,
+        turns: messages,
+      });
 
       log(`Archived conversation to ${filePath}`);
     } catch (err) {
@@ -360,7 +366,14 @@ async function runClaudeTurn(
     agentEnv,
   );
   const stream = new MessageStream();
-  stream.push(runtimeContext ? `${runtimeContext}\n\n${prompt}` : prompt);
+  const durableMemorySections = loadDurableMemoryPromptSections();
+  const initialPromptSections = [
+    runtimeContext,
+    'Recall and governance tools are available: use search_memory for durable facts and runbooks, search_sessions for archived conversations, search_group_history for exact recall from the active chat, and review_memory before changing long-lived memory or promoting skill candidates.',
+    ...durableMemorySections,
+    prompt,
+  ].filter((section): section is string => Boolean(section));
+  stream.push(initialPromptSections.join('\n\n'));
 
   for await (const message of query({
     prompt: stream,

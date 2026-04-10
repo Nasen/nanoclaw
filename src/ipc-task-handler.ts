@@ -10,7 +10,16 @@ import {
   NanoclawToolName,
 } from './admin-agents.js';
 import { GROUPS_DIR, TIMEZONE } from './config.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  recordMemoryEvent,
+  reviewGroupMemoryState,
+  searchChatHistory,
+  searchGroupDocuments,
+  updateTask,
+} from './db.js';
 import { isPersonalFolder } from './rc-auto-register.js';
 import { formatOnBehalfAssistantMessage } from './on-behalf-message.js';
 import { resolveCrossChatRcDelivery } from './rc-delivery-policy.js';
@@ -21,6 +30,15 @@ import {
   NotebookLmNotebook,
   NotebookLmSourceInput,
 } from './notebooklm.js';
+import {
+  DurableMemoryTarget,
+  upsertGroupDurableMemory,
+} from './durable-memory.js';
+import {
+  promoteSkillCandidateToRunbook,
+  upsertGroupRunbook,
+} from './runbook-manager.js';
+import { syncGroupDocumentIndex } from './search-index.js';
 import { AvailableGroup } from './container-contract.js';
 import {
   RcContactInput,
@@ -61,6 +79,13 @@ export interface TaskIpcData {
   onBehalfIntent?: boolean;
   targetGroupFolder?: string;
   context?: string;
+  target?: string;
+  content?: string;
+  kind?: string;
+  action?: string;
+  candidatePath?: string;
+  slug?: string;
+  summary?: string;
 }
 
 export interface TaskIpcDeps {
@@ -210,6 +235,21 @@ function hasGuardedOwnerVoiceAccess(sourceGroup: string): boolean {
   return canAdminAgentSpeakAsOwner(sourceGroup);
 }
 
+function requireToolAccess(
+  sourceGroup: string,
+  tool: NanoclawToolName,
+  fallbackAllowed: boolean,
+  requestId: string | undefined,
+): boolean {
+  if (hasToolAccess(sourceGroup, tool, fallbackAllowed)) return true;
+  writeTaskResponse(sourceGroup, requestId, {
+    ok: false,
+    error: `Tool ${tool} is not allowed for ${sourceGroup}.`,
+  });
+  logger.warn({ sourceGroup, tool }, 'Unauthorized IPC tool attempt blocked');
+  return false;
+}
+
 function resolveRcMode(
   sourceGroup: string,
   requested?: RcDeliveryMode,
@@ -260,6 +300,20 @@ async function withTimeout<T>(
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
   }
+}
+
+function resolveGroupChatJid(
+  sourceGroup: string,
+  registeredGroups: Record<string, RegisteredGroup>,
+  explicitChatJid?: string,
+): string | null {
+  if (explicitChatJid?.trim()) return explicitChatJid.trim();
+
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (group.folder === sourceGroup) return jid;
+  }
+
+  return null;
 }
 
 export async function processTaskIpc(
@@ -475,6 +529,359 @@ export async function processTaskIpc(
         requiresTrigger: data.requiresTrigger,
       });
       break;
+
+    case 'manage_memory': {
+      if (
+        !requireToolAccess(sourceGroup, 'manage_memory', isMain, data.requestId)
+      ) {
+        break;
+      }
+      if (!data.target || !data.content) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'target and content are required.',
+        });
+        break;
+      }
+
+      const target =
+        data.target === 'memory' || data.target === 'user'
+          ? (data.target as DurableMemoryTarget)
+          : null;
+
+      if (!target) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'target must be either "memory" or "user".',
+        });
+        break;
+      }
+
+      try {
+        const result = upsertGroupDurableMemory({
+          groupFolder: sourceGroup,
+          target,
+          title: data.title,
+          content: data.content,
+        });
+        syncGroupDocumentIndex(sourceGroup);
+        recordMemoryEvent({
+          groupFolder: sourceGroup,
+          eventType: 'memory_write',
+          target,
+          metadata: {
+            updated: result.updated,
+            skippedDuplicate: result.skippedDuplicate,
+            entryCount: result.entryCount,
+          },
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          target,
+          fileName: result.fileName,
+          filePath: result.filePath,
+          updated: result.updated,
+          skippedDuplicate: result.skippedDuplicate,
+          entryCount: result.entryCount,
+          droppedEntries: result.droppedEntries,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'search_memory': {
+      if (
+        !requireToolAccess(sourceGroup, 'search_memory', isMain, data.requestId)
+      ) {
+        break;
+      }
+      if (!data.query?.trim()) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'query is required.',
+        });
+        break;
+      }
+
+      try {
+        syncGroupDocumentIndex(sourceGroup);
+        const results = searchGroupDocuments(data.query, {
+          groupFolder: sourceGroup,
+          docTypes: [
+            'memory',
+            'user',
+            'working_memory',
+            'runbook',
+            'skill_candidate',
+          ],
+          limit: data.limit,
+        });
+        recordMemoryEvent({
+          groupFolder: sourceGroup,
+          eventType: 'search_memory',
+          query: data.query,
+          metadata: { resultCount: results.length },
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          results,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'search_sessions': {
+      if (
+        !requireToolAccess(
+          sourceGroup,
+          'search_sessions',
+          isMain,
+          data.requestId,
+        )
+      ) {
+        break;
+      }
+      if (!data.query?.trim()) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'query is required.',
+        });
+        break;
+      }
+
+      try {
+        syncGroupDocumentIndex(sourceGroup);
+        const results = searchGroupDocuments(data.query, {
+          groupFolder: sourceGroup,
+          docTypes: ['conversation'],
+          limit: data.limit,
+        });
+        recordMemoryEvent({
+          groupFolder: sourceGroup,
+          eventType: 'search_sessions',
+          query: data.query,
+          metadata: { resultCount: results.length },
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          results,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'search_group_history': {
+      if (
+        !requireToolAccess(
+          sourceGroup,
+          'search_group_history',
+          isMain,
+          data.requestId,
+        )
+      ) {
+        break;
+      }
+      if (!data.query?.trim()) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'query is required.',
+        });
+        break;
+      }
+
+      const currentChatJid = resolveGroupChatJid(
+        sourceGroup,
+        registeredGroups,
+        data.chatJid,
+      );
+      if (!currentChatJid) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'Unable to resolve the current chat JID for this group.',
+        });
+        break;
+      }
+
+      try {
+        const results = searchChatHistory(data.query, {
+          chatJid: currentChatJid,
+          limit: data.limit,
+        });
+        recordMemoryEvent({
+          groupFolder: sourceGroup,
+          eventType: 'search_group_history',
+          query: data.query,
+          metadata: { resultCount: results.length, chatJid: currentChatJid },
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          chatJid: currentChatJid,
+          results,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+
+    case 'review_memory': {
+      if (
+        !requireToolAccess(sourceGroup, 'review_memory', isMain, data.requestId)
+      ) {
+        break;
+      }
+      syncGroupDocumentIndex(sourceGroup);
+      const review = reviewGroupMemoryState(sourceGroup, {
+        limit: data.limit,
+      });
+      recordMemoryEvent({
+        groupFolder: sourceGroup,
+        eventType: 'review_memory',
+        metadata: {
+          staleCount: review.staleDocuments.length,
+          skillCandidateCount: review.skillCandidates.length,
+        },
+      });
+      writeTaskResponse(sourceGroup, data.requestId, {
+        ok: true,
+        review,
+      });
+      break;
+    }
+
+    case 'manage_runbook': {
+      if (
+        !requireToolAccess(
+          sourceGroup,
+          'manage_runbook',
+          isMain,
+          data.requestId,
+        )
+      ) {
+        break;
+      }
+      const action = data.action === 'promote' ? 'promote' : 'upsert';
+
+      if (action === 'promote') {
+        if (!data.candidatePath) {
+          writeTaskResponse(sourceGroup, data.requestId, {
+            ok: false,
+            error: 'candidatePath is required for promotion.',
+          });
+          break;
+        }
+
+        try {
+          const result = promoteSkillCandidateToRunbook({
+            groupFolder: sourceGroup,
+            candidatePath: data.candidatePath,
+            title: data.title,
+            summary: data.summary,
+            slug: data.slug,
+          });
+          syncGroupDocumentIndex(sourceGroup);
+          recordMemoryEvent({
+            groupFolder: sourceGroup,
+            eventType: 'runbook_promote',
+            target: 'runbook',
+            metadata: {
+              sourceRelativePath: result.sourceRelativePath,
+              relativePath: result.relativePath,
+            },
+          });
+          writeTaskResponse(sourceGroup, data.requestId, {
+            ok: true,
+            action,
+            filePath: result.filePath,
+            relativePath: result.relativePath,
+            sourcePath: result.sourcePath,
+            sourceRelativePath: result.sourceRelativePath,
+            indexPath: result.indexPath,
+            updated: result.updated,
+          });
+        } catch (err) {
+          writeTaskResponse(sourceGroup, data.requestId, {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        break;
+      }
+
+      if (!data.kind || !data.title || !data.content) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'kind, title, and content are required.',
+        });
+        break;
+      }
+
+      const kind =
+        data.kind === 'runbook' || data.kind === 'skill_candidate'
+          ? data.kind
+          : null;
+      if (!kind) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: 'kind must be "runbook" or "skill_candidate".',
+        });
+        break;
+      }
+
+      try {
+        const result = upsertGroupRunbook({
+          groupFolder: sourceGroup,
+          kind,
+          title: data.title,
+          body: data.content,
+          summary: data.summary,
+          slug: data.slug,
+        });
+        syncGroupDocumentIndex(sourceGroup);
+        recordMemoryEvent({
+          groupFolder: sourceGroup,
+          eventType: 'runbook_write',
+          target: kind,
+          metadata: {
+            relativePath: result.relativePath,
+            updated: result.updated,
+          },
+        });
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: true,
+          action,
+          kind,
+          filePath: result.filePath,
+          relativePath: result.relativePath,
+          indexPath: result.indexPath,
+          updated: result.updated,
+        });
+      } catch (err) {
+        writeTaskResponse(sourceGroup, data.requestId, {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
 
     case 'delegate_to_group': {
       if (!data.targetGroupFolder || !data.prompt) {

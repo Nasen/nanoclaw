@@ -82,6 +82,48 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS group_documents (
+      path TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      doc_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      mtime_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_documents_lookup
+      ON group_documents(group_folder, doc_type, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS memory_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      target TEXT,
+      query TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_events_lookup
+      ON memory_events(group_folder, event_type, created_at DESC);
+  `);
+
+  database.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      chat_jid UNINDEXED,
+      message_id UNINDEXED,
+      sender_name,
+      content,
+      timestamp UNINDEXED
+    );
+  `);
+
+  database.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS group_documents_fts USING fts5(
+      path UNINDEXED,
+      group_folder UNINDEXED,
+      doc_type UNINDEXED,
+      title,
+      content
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -158,6 +200,7 @@ export function initDatabase(): void {
 
   // Migrate from JSON files if they exist
   migrateJsonState();
+  rebuildMessagesFtsIndexIfNeeded();
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -226,6 +269,126 @@ export function updateChatName(chatJid: string, name: string): void {
   ).run(chatJid, name, new Date().toISOString());
 }
 
+function deleteMessageFtsRow(chatJid: string, messageId: string): void {
+  db.prepare(
+    'DELETE FROM messages_fts WHERE chat_jid = ? AND message_id = ?',
+  ).run(chatJid, messageId);
+}
+
+function upsertMessageFtsRow(msg: {
+  id: string;
+  chat_jid: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+}): void {
+  deleteMessageFtsRow(msg.chat_jid, msg.id);
+  db.prepare(
+    `
+    INSERT INTO messages_fts (chat_jid, message_id, sender_name, content, timestamp)
+    VALUES (?, ?, ?, ?, ?)
+  `,
+  ).run(
+    msg.chat_jid,
+    msg.id,
+    msg.sender_name || '',
+    msg.content || '',
+    msg.timestamp,
+  );
+}
+
+function rebuildMessagesFtsIndexIfNeeded(): void {
+  const ftsCount = db
+    .prepare('SELECT COUNT(*) AS count FROM messages_fts')
+    .get() as { count: number };
+  if (ftsCount.count > 0) return;
+
+  const rows = db
+    .prepare(
+      `
+    SELECT id, chat_jid, sender_name, content, timestamp
+    FROM messages
+    WHERE content != '' AND content IS NOT NULL
+  `,
+    )
+    .all() as Array<{
+    id: string;
+    chat_jid: string;
+    sender_name: string;
+    content: string;
+    timestamp: string;
+  }>;
+
+  const insert = db.prepare(
+    `
+    INSERT INTO messages_fts (chat_jid, message_id, sender_name, content, timestamp)
+    VALUES (?, ?, ?, ?, ?)
+  `,
+  );
+  const transaction = db.transaction(() => {
+    for (const row of rows) {
+      insert.run(
+        row.chat_jid,
+        row.id,
+        row.sender_name || '',
+        row.content || '',
+        row.timestamp,
+      );
+    }
+  });
+  transaction();
+}
+
+function buildFtsQuery(query: string): string {
+  const normalized = query.trim();
+  if (!normalized) return '';
+
+  const tokens = normalized.match(/[A-Za-z0-9_]+/g) ?? [];
+  if (tokens.length === 0) {
+    return `"${normalized.replace(/"/g, '""')}"`;
+  }
+
+  return tokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(' ');
+}
+
+function buildLikeQuery(query: string): string {
+  return `%${query.trim().toLowerCase()}%`;
+}
+
+function buildExcerptSnippet(content: string, query: string): string {
+  const normalizedContent = content.replace(/\s+/g, ' ').trim();
+  if (!normalizedContent) return '';
+
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return normalizedContent.slice(0, 180);
+  }
+
+  const matchIndex = normalizedContent.toLowerCase().indexOf(normalizedQuery);
+  if (matchIndex === -1) {
+    return normalizedContent.slice(0, 180);
+  }
+
+  const start = Math.max(0, matchIndex - 50);
+  const end = Math.min(
+    normalizedContent.length,
+    matchIndex + normalizedQuery.length + 90,
+  );
+  const prefix = start > 0 ? '… ' : '';
+  const suffix = end < normalizedContent.length ? ' …' : '';
+  return `${prefix}${normalizedContent.slice(start, end).trim()}${suffix}`;
+}
+
+function normalizeSearchSnippet(
+  snippet: string | null | undefined,
+  content: string,
+  query: string,
+): string {
+  const trimmed = snippet?.trim();
+  if (trimmed) return trimmed;
+  return buildExcerptSnippet(content, query);
+}
+
 export interface ChatInfo {
   jid: string;
   name: string;
@@ -242,6 +405,73 @@ export interface ChatParticipantInfo {
 
 export interface ChatParticipantChatInfo extends ChatParticipantInfo {
   chat_jid: string;
+}
+
+export interface GroupDocumentRecord {
+  path: string;
+  group_folder: string;
+  doc_type: string;
+  title: string;
+  content: string;
+  updated_at: string;
+  mtime_ms: number;
+}
+
+export interface GroupDocumentSearchResult {
+  path: string;
+  group_folder: string;
+  doc_type: string;
+  title: string;
+  updated_at: string;
+  snippet: string;
+}
+
+export interface ChatHistorySearchResult {
+  id: string;
+  chat_jid: string;
+  chat_name: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  snippet: string;
+}
+
+export interface MemoryEventRecord {
+  id: number;
+  group_folder: string;
+  event_type: string;
+  target: string | null;
+  query: string | null;
+  metadata: string | null;
+  created_at: string;
+}
+
+export interface MemoryEventSummary {
+  event_type: string;
+  count: number;
+  latest_at: string;
+}
+
+export interface GroupDocumentStat {
+  doc_type: string;
+  count: number;
+  newest_updated_at: string | null;
+  oldest_updated_at: string | null;
+}
+
+export interface StaleGroupDocument {
+  path: string;
+  doc_type: string;
+  title: string;
+  updated_at: string;
+  age_days: number;
+}
+
+export interface GroupMemoryReview {
+  staleDocuments: StaleGroupDocument[];
+  skillCandidates: GroupDocumentSearchResult[];
+  recentEvents: MemoryEventSummary[];
+  documentStats: GroupDocumentStat[];
 }
 
 /**
@@ -479,6 +709,508 @@ export function findChatsByParticipantName(
     ) as ChatParticipantChatInfo[];
 }
 
+export function upsertGroupDocument(doc: GroupDocumentRecord): void {
+  db.prepare(
+    `
+    INSERT OR REPLACE INTO group_documents (
+      path,
+      group_folder,
+      doc_type,
+      title,
+      content,
+      updated_at,
+      mtime_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    doc.path,
+    doc.group_folder,
+    doc.doc_type,
+    doc.title,
+    doc.content,
+    doc.updated_at,
+    doc.mtime_ms,
+  );
+
+  db.prepare('DELETE FROM group_documents_fts WHERE path = ?').run(doc.path);
+  db.prepare(
+    `
+    INSERT INTO group_documents_fts (path, group_folder, doc_type, title, content)
+    VALUES (?, ?, ?, ?, ?)
+  `,
+  ).run(doc.path, doc.group_folder, doc.doc_type, doc.title, doc.content);
+}
+
+export function deleteGroupDocumentsExcept(
+  groupFolder: string,
+  keepPaths: string[],
+): void {
+  const existingRows = db
+    .prepare('SELECT path FROM group_documents WHERE group_folder = ?')
+    .all(groupFolder) as Array<{ path: string }>;
+  const keep = new Set(keepPaths);
+  const stalePaths = existingRows
+    .map((row) => row.path)
+    .filter((candidate) => !keep.has(candidate));
+
+  const transaction = db.transaction(() => {
+    for (const stalePath of stalePaths) {
+      db.prepare('DELETE FROM group_documents WHERE path = ?').run(stalePath);
+      db.prepare('DELETE FROM group_documents_fts WHERE path = ?').run(
+        stalePath,
+      );
+    }
+  });
+  transaction();
+}
+
+export function recordMemoryEvent(params: {
+  groupFolder: string;
+  eventType: string;
+  target?: string | null;
+  query?: string | null;
+  metadata?: string | Record<string, unknown> | null;
+  createdAt?: string;
+}): void {
+  const metadata =
+    params.metadata === undefined || params.metadata === null
+      ? null
+      : typeof params.metadata === 'string'
+        ? params.metadata
+        : JSON.stringify(params.metadata);
+
+  db.prepare(
+    `
+    INSERT INTO memory_events (
+      group_folder,
+      event_type,
+      target,
+      query,
+      metadata,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    params.groupFolder,
+    params.eventType,
+    params.target ?? null,
+    params.query ?? null,
+    metadata,
+    params.createdAt ?? new Date().toISOString(),
+  );
+}
+
+export function searchGroupDocuments(
+  query: string,
+  options: {
+    groupFolder: string;
+    docTypes?: string[];
+    limit?: number;
+  },
+): GroupDocumentSearchResult[] {
+  const ftsQuery = buildFtsQuery(query);
+  const likeQuery = buildLikeQuery(query);
+  if (!ftsQuery && !query.trim()) return [];
+
+  const limit = Math.max(options.limit ?? 10, 1);
+  const docTypes = options.docTypes?.filter(Boolean) ?? [];
+  const placeholders = docTypes.map(() => '?').join(', ');
+
+  if (docTypes.length === 0) {
+    const ftsResults =
+      ftsQuery.length > 0
+        ? (db
+            .prepare(
+              `
+        SELECT
+          gd.path,
+          gd.group_folder,
+          gd.doc_type,
+          gd.title,
+          gd.updated_at,
+          gd.content,
+          snippet(group_documents_fts, 4, '[', ']', ' … ', 18) AS snippet
+        FROM group_documents_fts
+        JOIN group_documents gd ON gd.path = group_documents_fts.path
+        WHERE group_documents_fts MATCH ?
+          AND gd.group_folder = ?
+        ORDER BY
+          CASE
+            WHEN lower(gd.title) = lower(?) THEN 0
+            WHEN lower(gd.title) LIKE ? THEN 1
+            ELSE 2
+          END,
+          bm25(group_documents_fts),
+          gd.updated_at DESC
+        LIMIT ?
+      `,
+            )
+            .all(
+              ftsQuery,
+              options.groupFolder,
+              query.trim(),
+              likeQuery,
+              limit,
+            ) as Array<GroupDocumentSearchResult & { content: string }>)
+        : [];
+
+    if (ftsResults.length > 0) {
+      return ftsResults.map(({ content, ...result }) => ({
+        ...result,
+        snippet: normalizeSearchSnippet(result.snippet, content, query),
+      }));
+    }
+
+    const fallbackResults = db
+      .prepare(
+        `
+        SELECT
+          path,
+          group_folder,
+          doc_type,
+          title,
+          updated_at,
+          content
+        FROM group_documents
+        WHERE group_folder = ?
+          AND (lower(title) LIKE ? OR lower(content) LIKE ?)
+        ORDER BY
+          CASE
+            WHEN lower(title) = lower(?) THEN 0
+            WHEN lower(title) LIKE ? THEN 1
+            ELSE 2
+          END,
+          updated_at DESC
+        LIMIT ?
+      `,
+      )
+      .all(
+        options.groupFolder,
+        likeQuery,
+        likeQuery,
+        query.trim(),
+        likeQuery,
+        limit,
+      ) as Array<GroupDocumentSearchResult & { content: string }>;
+    return fallbackResults.map(({ content, ...result }) => ({
+      ...result,
+      snippet: buildExcerptSnippet(content, query),
+    }));
+  }
+
+  const ftsResults =
+    ftsQuery.length > 0
+      ? (db
+          .prepare(
+            `
+      SELECT
+        gd.path,
+        gd.group_folder,
+        gd.doc_type,
+        gd.title,
+        gd.updated_at,
+        gd.content,
+        snippet(group_documents_fts, 4, '[', ']', ' … ', 18) AS snippet
+      FROM group_documents_fts
+      JOIN group_documents gd ON gd.path = group_documents_fts.path
+      WHERE group_documents_fts MATCH ?
+        AND gd.group_folder = ?
+        AND gd.doc_type IN (${placeholders})
+      ORDER BY
+        CASE
+          WHEN lower(gd.title) = lower(?) THEN 0
+          WHEN lower(gd.title) LIKE ? THEN 1
+          ELSE 2
+        END,
+        bm25(group_documents_fts),
+        gd.updated_at DESC
+      LIMIT ?
+    `,
+          )
+          .all(
+            ftsQuery,
+            options.groupFolder,
+            ...docTypes,
+            query.trim(),
+            likeQuery,
+            limit,
+          ) as Array<GroupDocumentSearchResult & { content: string }>)
+      : [];
+
+  if (ftsResults.length > 0) {
+    return ftsResults.map(({ content, ...result }) => ({
+      ...result,
+      snippet: normalizeSearchSnippet(result.snippet, content, query),
+    }));
+  }
+
+  const fallbackResults = db
+    .prepare(
+      `
+      SELECT
+        path,
+        group_folder,
+        doc_type,
+        title,
+        updated_at,
+        content
+      FROM group_documents
+      WHERE group_folder = ?
+        AND doc_type IN (${placeholders})
+        AND (lower(title) LIKE ? OR lower(content) LIKE ?)
+      ORDER BY
+        CASE
+          WHEN lower(title) = lower(?) THEN 0
+          WHEN lower(title) LIKE ? THEN 1
+          ELSE 2
+        END,
+        updated_at DESC
+      LIMIT ?
+    `,
+    )
+    .all(
+      options.groupFolder,
+      ...docTypes,
+      likeQuery,
+      likeQuery,
+      query.trim(),
+      likeQuery,
+      limit,
+    ) as Array<GroupDocumentSearchResult & { content: string }>;
+  return fallbackResults.map(({ content, ...result }) => ({
+    ...result,
+    snippet: buildExcerptSnippet(content, query),
+  }));
+}
+
+export function searchChatHistory(
+  query: string,
+  options: {
+    chatJid: string;
+    limit?: number;
+  },
+): ChatHistorySearchResult[] {
+  const ftsQuery = buildFtsQuery(query);
+  const likeQuery = buildLikeQuery(query);
+  if (!ftsQuery && !query.trim()) return [];
+
+  const limit = Math.max(options.limit ?? 10, 1);
+  const ftsResults =
+    ftsQuery.length > 0
+      ? (db
+          .prepare(
+            `
+      SELECT
+        m.id,
+        m.chat_jid,
+        c.name AS chat_name,
+        m.sender_name,
+        m.content,
+        m.timestamp,
+        snippet(messages_fts, 3, '[', ']', ' … ', 18) AS snippet
+      FROM messages_fts
+      JOIN messages m
+        ON m.chat_jid = messages_fts.chat_jid
+       AND m.id = messages_fts.message_id
+      JOIN chats c ON c.jid = m.chat_jid
+      WHERE messages_fts MATCH ?
+        AND m.chat_jid = ?
+        AND m.is_bot_message = 0
+      ORDER BY
+        CASE
+          WHEN lower(COALESCE(m.sender_name, '')) = lower(?) THEN 0
+          WHEN lower(COALESCE(m.sender_name, '')) LIKE ? THEN 1
+          ELSE 2
+        END,
+        bm25(messages_fts),
+        m.timestamp DESC
+      LIMIT ?
+    `,
+          )
+          .all(
+            ftsQuery,
+            options.chatJid,
+            query.trim(),
+            likeQuery,
+            limit,
+          ) as ChatHistorySearchResult[])
+      : [];
+
+  if (ftsResults.length > 0) {
+    return ftsResults.map((result) => ({
+      ...result,
+      snippet: normalizeSearchSnippet(result.snippet, result.content, query),
+    }));
+  }
+
+  const fallbackResults = db
+    .prepare(
+      `
+      SELECT
+        m.id,
+        m.chat_jid,
+        c.name AS chat_name,
+        m.sender_name,
+        m.content,
+        m.timestamp
+      FROM messages m
+      JOIN chats c ON c.jid = m.chat_jid
+      WHERE m.chat_jid = ?
+        AND m.is_bot_message = 0
+        AND (
+          lower(COALESCE(m.sender_name, '')) LIKE ?
+          OR lower(COALESCE(m.content, '')) LIKE ?
+        )
+      ORDER BY
+        CASE
+          WHEN lower(COALESCE(m.sender_name, '')) = lower(?) THEN 0
+          WHEN lower(COALESCE(m.sender_name, '')) LIKE ? THEN 1
+          ELSE 2
+        END,
+        m.timestamp DESC
+      LIMIT ?
+    `,
+    )
+    .all(
+      options.chatJid,
+      likeQuery,
+      likeQuery,
+      query.trim(),
+      likeQuery,
+      limit,
+    ) as Array<Omit<ChatHistorySearchResult, 'snippet'>>;
+  return fallbackResults.map((result) => ({
+    ...result,
+    snippet: buildExcerptSnippet(result.content, query),
+  }));
+}
+
+export function getMemoryEventSummary(
+  groupFolder: string,
+  windowDays = 30,
+): MemoryEventSummary[] {
+  const since = new Date(
+    Date.now() - windowDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  return db
+    .prepare(
+      `
+      SELECT
+        event_type,
+        COUNT(*) AS count,
+        MAX(created_at) AS latest_at
+      FROM memory_events
+      WHERE group_folder = ?
+        AND created_at >= ?
+      GROUP BY event_type
+      ORDER BY count DESC, latest_at DESC
+    `,
+    )
+    .all(groupFolder, since) as MemoryEventSummary[];
+}
+
+export function getGroupDocumentStats(
+  groupFolder: string,
+): GroupDocumentStat[] {
+  return db
+    .prepare(
+      `
+      SELECT
+        doc_type,
+        COUNT(*) AS count,
+        MAX(updated_at) AS newest_updated_at,
+        MIN(updated_at) AS oldest_updated_at
+      FROM group_documents
+      WHERE group_folder = ?
+      GROUP BY doc_type
+      ORDER BY doc_type ASC
+    `,
+    )
+    .all(groupFolder) as GroupDocumentStat[];
+}
+
+function listSkillCandidateDocuments(
+  groupFolder: string,
+  limit: number,
+): GroupDocumentSearchResult[] {
+  return db
+    .prepare(
+      `
+      SELECT
+        path,
+        group_folder,
+        doc_type,
+        title,
+        updated_at,
+        substr(replace(content, char(10), ' '), 1, 180) AS snippet
+      FROM group_documents
+      WHERE group_folder = ?
+        AND doc_type = 'skill_candidate'
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `,
+    )
+    .all(groupFolder, limit) as GroupDocumentSearchResult[];
+}
+
+export function reviewGroupMemoryState(
+  groupFolder: string,
+  options: {
+    limit?: number;
+    now?: Date;
+  } = {},
+): GroupMemoryReview {
+  const limit = Math.max(options.limit ?? 10, 1);
+  const now = options.now ?? new Date();
+  const staleThresholds: Record<string, number> = {
+    memory: 90,
+    user: 120,
+    working_memory: 7,
+    runbook: 180,
+    skill_candidate: 30,
+  };
+
+  const staleRows = db
+    .prepare(
+      `
+      SELECT path, doc_type, title, updated_at
+      FROM group_documents
+      WHERE group_folder = ?
+        AND doc_type IN ('memory', 'user', 'working_memory', 'runbook', 'skill_candidate')
+      ORDER BY updated_at ASC
+    `,
+    )
+    .all(groupFolder) as Array<{
+    path: string;
+    doc_type: string;
+    title: string;
+    updated_at: string;
+  }>;
+
+  const staleDocuments = staleRows
+    .map((row) => {
+      const ageDays = Math.floor(
+        (now.getTime() - new Date(row.updated_at).getTime()) /
+          (24 * 60 * 60 * 1000),
+      );
+      return {
+        ...row,
+        age_days: ageDays,
+      };
+    })
+    .filter((row) => row.age_days >= (staleThresholds[row.doc_type] ?? 365))
+    .slice(0, limit);
+
+  const skillCandidates = listSkillCandidateDocuments(groupFolder, limit);
+
+  return {
+    staleDocuments,
+    skillCandidates,
+    recentEvents: getMemoryEventSummary(groupFolder),
+    documentStats: getGroupDocumentStats(groupFolder),
+  };
+}
+
 /**
  * Get timestamp of last group metadata sync.
  */
@@ -517,6 +1249,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
+  upsertMessageFtsRow(msg);
 }
 
 /**
@@ -544,6 +1277,7 @@ export function storeMessageDirect(msg: {
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
   );
+  upsertMessageFtsRow(msg);
 }
 
 export function getNewMessages(
