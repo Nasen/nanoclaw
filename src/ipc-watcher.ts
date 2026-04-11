@@ -23,12 +23,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
   const processIpcFiles = async () => {
     let groupFolders: string[];
     try {
+      fs.mkdirSync(ipcBaseDir, { recursive: true });
       groupFolders = fs.readdirSync(ipcBaseDir).filter((folder) => {
         const stat = fs.statSync(path.join(ipcBaseDir, folder));
         return stat.isDirectory() && folder !== 'errors';
       });
     } catch (err) {
-      logger.error({ err }, 'Error reading IPC base directory');
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        fs.mkdirSync(ipcBaseDir, { recursive: true });
+        logger.warn(
+          { ipcBaseDir },
+          'IPC base directory was missing and has been recreated',
+        );
+      } else {
+        logger.error({ err }, 'Error reading IPC base directory');
+      }
       setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
       return;
     }
