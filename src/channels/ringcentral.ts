@@ -1,5 +1,3 @@
-import { createRequire } from 'module';
-
 import { SDK } from '@ringcentral/sdk';
 import { Subscriptions } from '@ringcentral/subscriptions';
 
@@ -15,15 +13,15 @@ import type {
 } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
-// @rc-ex/ws exposes CommonJS-friendly exports that are more reliable through
-// createRequire in the built host process.
-const require = createRequire(import.meta.url);
-const RcWsExtension = require('@rc-ex/ws');
-const WebSocketExtension = RcWsExtension.default ?? RcWsExtension;
-
 type RCSdk = InstanceType<typeof SDK>;
 type RCPlatform = ReturnType<RCSdk['platform']>;
-type WsExtInstance = InstanceType<typeof WebSocketExtension>;
+type RcWsSubscription = {
+  revoke?: () => Promise<void>;
+  remove?: () => void;
+  wse?: {
+    disconnect?: () => Promise<void>;
+  };
+};
 
 const DEFAULT_SERVER = 'https://platform.ringcentral.com';
 const TM_BASE = '/team-messaging/v1';
@@ -187,7 +185,7 @@ class RingCentralAdapter implements ChannelAdapter {
   private connected = false;
   private botExtId: string | undefined;
   private platform: RCPlatform | undefined;
-  private wsExt: WsExtInstance | undefined;
+  private subscription: RcWsSubscription | undefined;
   private sentPostIds = new Map<string, number>();
   private lastOwnerIdByChat = new Map<string, string>();
 
@@ -206,23 +204,6 @@ class RingCentralAdapter implements ChannelAdapter {
     const subscriptions = new Subscriptions({ sdk });
     await (subscriptions as unknown as { init?: () => Promise<void> }).init?.();
 
-    const wsExt = new WebSocketExtension({
-      debugMode: false,
-      autoRecover: {
-        enabled: true,
-        checkInterval: (retry: number) => Math.min(5000 * Math.pow(2, retry), 300_000),
-        pingServerInterval: 60_000,
-      },
-    });
-
-    const rc = (subscriptions as unknown as { rc?: { installExtension: (ext: unknown) => Promise<void> } }).rc;
-    if (!rc?.installExtension) {
-      throw new Error('@rc-ex/ws installExtension not found');
-    }
-    await rc.installExtension(wsExt);
-    await wsExt.connect(false);
-    this.wsExt = wsExt;
-
     try {
       const resp = await platform.get('/restapi/v1.0/account/~/extension/~');
       const me = (await resp.json()) as { id?: string | number };
@@ -238,7 +219,7 @@ class RingCentralAdapter implements ChannelAdapter {
         log.error('RingCentral event handler failed', { channel: this.channelType, err }),
       );
     });
-    await sub.register();
+    this.subscription = (await sub.register()) as RcWsSubscription;
 
     this.connected = true;
     log.info('RingCentral channel started', { channel: this.channelType, botExtId: this.botExtId });
@@ -246,7 +227,15 @@ class RingCentralAdapter implements ChannelAdapter {
 
   async teardown(): Promise<void> {
     this.connected = false;
-    await (this.wsExt as { disconnect?: () => Promise<void> } | undefined)?.disconnect?.();
+    const subscription = this.subscription;
+    this.subscription = undefined;
+    try {
+      await subscription?.revoke?.();
+    } catch (err) {
+      log.warn('RingCentral subscription revoke failed', { channel: this.channelType, err });
+      subscription?.remove?.();
+    }
+    await subscription?.wse?.disconnect?.();
   }
 
   isConnected(): boolean {
