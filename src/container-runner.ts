@@ -48,6 +48,12 @@ import {
 import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+const DIRECT_PROVIDER_AUTH_ENV_KEYS = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'OPENAI_API_KEY',
+]);
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -417,20 +423,13 @@ async function buildContainerArgs(
       args.push('-e', `${key}=${value}`);
     }
   }
+  if (providerContribution.envFiles) {
+    for (const envFile of providerContribution.envFiles) {
+      args.push('--env-file', envFile);
+    }
+  }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-  }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
+  await applyCredentialGateway(args, containerName, agentGroup, provider, providerContribution, agentIdentifier);
 
   // Host gateway
   args.push(...hostGatewayArgs());
@@ -462,6 +461,52 @@ async function buildContainerArgs(
   args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
+}
+
+function hasOneCliConfiguration(): boolean {
+  return Boolean(ONECLI_URL?.trim() || ONECLI_API_KEY?.trim());
+}
+
+function hasDirectProviderCredentials(providerContribution: ProviderContainerContribution): boolean {
+  if (providerContribution.envFiles?.length) return true;
+  return Object.keys(providerContribution.env ?? {}).some((key) => DIRECT_PROVIDER_AUTH_ENV_KEYS.has(key));
+}
+
+async function applyCredentialGateway(
+  args: string[],
+  containerName: string,
+  agentGroup: AgentGroup,
+  provider: string,
+  providerContribution: ProviderContainerContribution,
+  agentIdentifier?: string,
+): Promise<void> {
+  const directCredentials = hasDirectProviderCredentials(providerContribution);
+
+  if (!hasOneCliConfiguration()) {
+    if (directCredentials || provider === 'mock') {
+      log.info('OneCLI gateway skipped; using direct provider credentials', { containerName, provider });
+      return;
+    }
+    throw new Error(`No OneCLI gateway or direct credentials configured for provider "${provider}"`);
+  }
+
+  // OneCLI gateway injects HTTPS_PROXY + certs so container API calls are
+  // routed through the agent vault for credential injection. If the gateway
+  // rejects or is unavailable but direct provider credentials are present, run
+  // locally instead of leaving RingCentral messages pending forever.
+  try {
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied');
+    }
+    log.info('OneCLI gateway applied', { containerName, provider });
+  } catch (err) {
+    if (!directCredentials) throw err;
+    log.warn('OneCLI gateway unavailable; using direct provider credentials', { containerName, provider, err });
+  }
 }
 
 /** Build a per-agent-group Docker image with custom packages. */

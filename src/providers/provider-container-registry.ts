@@ -7,9 +7,9 @@
  * the registered config fn, and merges the returned mounts/env into the spawn
  * args.
  *
- * Providers without host-side needs (e.g. `claude`, `mock`) don't appear in
- * this registry at all — the lookup returns `undefined` and the spawn path
- * proceeds with only the default mounts and env.
+ * Providers without host-side needs (e.g. `mock`) don't appear in this registry
+ * at all — the lookup returns `undefined` and the spawn path proceeds with only
+ * the default mounts and env.
  *
  * Skills add a new provider's host config by creating `src/providers/<name>.ts`
  * with a top-level `registerProviderContainerConfig(...)` call, then appending
@@ -34,8 +34,10 @@ export interface ProviderContainerContext {
 export interface ProviderContainerContribution {
   /** Extra volume mounts (merged with the default session/group/agent-runner mounts). */
   mounts?: VolumeMount[];
-  /** Extra env vars to pass to the container (`-e KEY=VALUE`). */
+  /** Extra non-sensitive env vars to pass to the container (`-e KEY=VALUE`). */
   env?: Record<string, string>;
+  /** Docker env-file paths for sensitive provider env vars. */
+  envFiles?: string[];
 }
 
 export type ProviderContainerConfigFn = (ctx: ProviderContainerContext) => ProviderContainerContribution;

@@ -1,28 +1,34 @@
 /**
- * Claude provider container config — only registered when the user has
- * configured a custom Anthropic-compatible endpoint via setup. Setup
- * appends `import './claude.js'` to providers/index.ts at that point;
- * standard installs hitting api.anthropic.com don't need this file
- * loaded.
+ * Claude provider container config.
  *
- * The real auth token never enters the container. Setup creates an
- * OneCLI generic secret (host-pattern = base URL hostname, header-name
- * = Authorization, value-format = "Bearer {value}") so the proxy
- * rewrites the Authorization header on the wire. The container only
- * needs:
- *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
- *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
- *     Authorization: Bearer header for OneCLI to overwrite
+ * Preferred path: direct local credentials are passed via a per-session Docker
+ * env-file so installs without a working OneCLI gateway can still run.
+ *
+ * OneCLI path: when only ANTHROPIC_BASE_URL is configured, keep the placeholder
+ * auth token so the gateway can rewrite the Authorization header.
  */
-import { readEnvFile } from '../env.js';
+import { pickEnv, readHostEnv, writeProviderEnvFile } from './env-file.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
-registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+const CLAUDE_ENV_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+];
+const CLAUDE_SECRET_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'];
+
+registerProviderContainerConfig('claude', (ctx) => {
+  const values = readHostEnv(CLAUDE_ENV_KEYS, ctx.hostEnv);
+  const secrets = pickEnv(values, CLAUDE_SECRET_KEYS);
   const env: Record<string, string> = {};
-  if (dotenv.ANTHROPIC_BASE_URL) {
-    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
+  if (values.ANTHROPIC_BASE_URL) {
+    env.ANTHROPIC_BASE_URL = values.ANTHROPIC_BASE_URL;
+  }
+  if (values.ANTHROPIC_BASE_URL && Object.keys(secrets).length === 0) {
     env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
   }
-  return { env };
+
+  const envFile = writeProviderEnvFile(ctx.sessionDir, 'claude', secrets);
+  return { env, envFiles: envFile ? [envFile] : undefined };
 });
