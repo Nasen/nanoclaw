@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation.
 #
@@ -30,9 +29,7 @@ RUN if [ -n "$NPM_CONFIG_REGISTRY" ]; then npm config set registry "$NPM_CONFIG_
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-liberation \
         fonts-noto-color-emoji \
@@ -80,8 +77,7 @@ WORKDIR /app
 
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
 # Most stable first, most frequently bumped last. Bumping claude-code
@@ -100,18 +96,26 @@ ENV PATH="$PNPM_HOME:$PATH"
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
 ARG PNPM_VERSION=10.33.0
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+RUN if [ -n "$NPM_CONFIG_REGISTRY" ]; then \
+      COREPACK_NPM_REGISTRY="$NPM_CONFIG_REGISTRY" corepack enable && \
+      COREPACK_NPM_REGISTRY="$NPM_CONFIG_REGISTRY" corepack prepare pnpm@${PNPM_VERSION} --activate; \
+    else \
+      corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate; \
+    fi
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
+RUN if [ -n "$NPM_CONFIG_REGISTRY" ]; then \
+      echo "registry=$NPM_CONFIG_REGISTRY" > /root/.npmrc; \
+    else \
+      : > /root/.npmrc; \
+    fi && \
+    echo "only-built-dependencies[]=agent-browser" >> /root/.npmrc && \
     echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc && \
-    pnpm install -g "vercel@${VERCEL_VERSION}"
+    (pnpm install -g "vercel@${VERCEL_VERSION}" || \
+      echo "Warning: optional vercel CLI install failed; continuing without vercel")
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
+RUN pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+RUN pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
