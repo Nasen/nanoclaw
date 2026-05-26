@@ -1,50 +1,42 @@
-import fs from 'fs';
+import { describe, expect, it } from 'vitest';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { determineVerifyStatus } from './verify.js';
 
-const execSyncMock = vi.fn();
+const healthyBase = {
+  service: 'running' as const,
+  credentials: 'configured',
+  registeredGroups: 1,
+};
 
-vi.mock('child_process', () => ({
-  execSync: execSyncMock,
-}));
-
-describe('detectContainerGitTools', () => {
-  beforeEach(() => {
-    execSyncMock.mockReset();
-    vi.restoreAllMocks();
+describe('determineVerifyStatus', () => {
+  it('accepts a healthy install with at least one wired agent group', () => {
+    expect(determineVerifyStatus(healthyBase)).toBe('success');
   });
 
-  it('returns ready when the image has both git and ssh', async () => {
-    execSyncMock.mockReturnValue(undefined);
-
-    const { detectContainerGitTools } = await import('./verify.js');
-
-    expect(detectContainerGitTools('/tmp/project', 'docker')).toBe('ready');
+  it('fails when no agent groups are registered', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+      }),
+    ).toBe('failed');
   });
 
-  it('falls back to Dockerfile detection when runtime verification fails', async () => {
-    execSyncMock.mockImplementation(() => {
-      throw new Error('image unavailable');
-    });
-    vi.spyOn(fs, 'readFileSync').mockReturnValue(
-      'RUN apt-get install -y git openssh-client',
-    );
-
-    const { detectContainerGitTools } = await import('./verify.js');
-
-    expect(detectContainerGitTools('/tmp/project', 'docker')).toBe(
-      'configured_but_not_verified',
-    );
+  it('fails when the service is not running', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        service: 'stopped',
+      }),
+    ).toBe('failed');
   });
 
-  it('returns missing when neither runtime nor Dockerfile confirms support', async () => {
-    execSyncMock.mockImplementation(() => {
-      throw new Error('image unavailable');
-    });
-    vi.spyOn(fs, 'readFileSync').mockReturnValue('RUN apt-get install -y git');
-
-    const { detectContainerGitTools } = await import('./verify.js');
-
-    expect(detectContainerGitTools('/tmp/project', 'docker')).toBe('missing');
+  it('fails when credentials are missing', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        credentials: 'missing',
+      }),
+    ).toBe('failed');
   });
 });

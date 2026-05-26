@@ -1,24 +1,16 @@
 #!/bin/bash
+# NanoClaw agent container entrypoint.
+#
+# The host passes initial session parameters via stdin as a single JSON blob,
+# then the agent-runner opens the session DBs at /workspace/{inbound,outbound}.db
+# and enters its poll loop. All further IO flows through those DBs.
+#
+# We capture stdin to a file first so /tmp/input.json is available for
+# post-mortem inspection if the container exits unexpectedly, then exec bun
+# so that bun becomes PID 1's direct child (under tini) and receives signals.
+
 set -e
 
-CURRENT_UID="$(id -u)"
-CURRENT_GID="$(id -g)"
-NSS_WRAPPER_LIB="/usr/lib/x86_64-linux-gnu/libnss_wrapper.so"
+cat > /tmp/input.json
 
-if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_UID}:${CURRENT_GID}:" /etc/passwd; then
-  if [ -f "${NSS_WRAPPER_LIB}" ]; then
-    export LD_PRELOAD="${NSS_WRAPPER_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
-    export NSS_WRAPPER_PASSWD=/tmp/nss-wrapper.passwd
-    export NSS_WRAPPER_GROUP=/tmp/nss-wrapper.group
-
-    cp /etc/passwd "${NSS_WRAPPER_PASSWD}"
-    cp /etc/group "${NSS_WRAPPER_GROUP}"
-
-    echo "nanoclaw:x:${CURRENT_UID}:${CURRENT_GID}:NanoClaw:${HOME:-/home/node}:/bin/sh" >> "${NSS_WRAPPER_PASSWD}"
-    if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_GID}:" /etc/group; then
-      echo "nanoclaw:x:${CURRENT_GID}:" >> "${NSS_WRAPPER_GROUP}"
-    fi
-  fi
-fi
-
-exec node /app/dist/index.js
+exec bun run /app/src/index.ts < /tmp/input.json

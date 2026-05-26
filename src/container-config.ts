@@ -1,424 +1,89 @@
+/**
+ * Container config types and materialization.
+ *
+ * Source of truth is the `container_configs` table in the central DB.
+ * This module provides:
+ *   - Type definitions for the file shape (read by the container runner)
+ *   - `materializeContainerJson()` — writes `groups/<folder>/container.json`
+ *     from the DB at spawn time
+ *   - `configFromDb()` — builds a `ContainerConfig` from a DB row + agent group
+ */
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
-import { getAdminAgentProfile } from './admin-agents.js';
-import { getAgentBackendConfig } from './agent-backend.js';
-import {
-  CONTAINER_HOST_GATEWAY,
-  hostGatewayArgs,
-  readonlyMountArgs,
-} from './container-runtime.js';
-import {
-  CONTAINER_IMAGE,
-  CREDENTIAL_PROXY_PORT,
-  DATA_DIR,
-  GROUPS_DIR,
-  TIMEZONE,
-} from './config.js';
-import { readEnvFile } from './env.js';
-import {
-  CONTAINER_GIT_AUTH_DIR,
-  getContainerGitAuthEnv,
-  getGitAuthPaths,
-  hasGitAuthDir,
-} from './git-auth.js';
-import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
-import { validateAdditionalMounts } from './mount-security.js';
-import { isMainFolder, isPersonalFolder } from './rc-auto-register.js';
-import { getAllRegisteredGroups } from './db.js';
-import { AdditionalMount, RegisteredGroup } from './types.js';
+import { GROUPS_DIR } from './config.js';
+import { getContainerConfig } from './db/container-configs.js';
+import { getAgentGroup } from './db/agent-groups.js';
+import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface VolumeMount {
+export interface McpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface AdditionalMountConfig {
   hostPath: string;
   containerPath: string;
-  readonly: boolean;
+  readonly?: boolean;
 }
 
-const CONTAINER_CA_BUNDLE_PATH = '/workspace/tls/web-fetch-ca-bundle.pem';
-
-const SESSION_SETTINGS = {
-  env: {
-    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-  },
-};
-
-const SESSION_REMOTE_SETTINGS = {};
-
-function ensureGroupSessionsDir(group: RegisteredGroup): string {
-  const groupSessionsRoot = path.join(DATA_DIR, 'sessions', group.folder);
-  const groupSessionsDir = path.join(groupSessionsRoot, '.claude');
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  fs.mkdirSync(path.join(groupSessionsRoot, '.nanoclaw'), { recursive: true });
-
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      `${JSON.stringify(SESSION_SETTINGS, null, 2)}\n`,
-    );
-  }
-
-  const remoteSettingsFile = path.join(
-    groupSessionsDir,
-    'remote-settings.json',
-  );
-  if (!fs.existsSync(remoteSettingsFile)) {
-    fs.writeFileSync(
-      remoteSettingsFile,
-      `${JSON.stringify(SESSION_REMOTE_SETTINGS, null, 2)}\n`,
-    );
-  }
-
-  return groupSessionsDir;
+/** Shape of the materialized `container.json` file read by the container runner. */
+export interface ContainerConfig {
+  mcpServers: Record<string, McpServerConfig>;
+  packages: { apt: string[]; npm: string[] };
+  imageTag?: string;
+  additionalMounts: AdditionalMountConfig[];
+  skills: string[] | 'all';
+  provider?: string;
+  groupName?: string;
+  assistantName?: string;
+  agentGroupId?: string;
+  maxMessagesPerPrompt?: number;
+  model?: string;
+  effort?: string;
 }
 
-function syncContainerSkills(groupSessionsDir: string): void {
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (!fs.existsSync(skillsSrc)) return;
-
-  for (const skillDir of fs.readdirSync(skillsSrc)) {
-    const srcDir = path.join(skillsSrc, skillDir);
-    if (!fs.statSync(srcDir).isDirectory()) continue;
-    fs.cpSync(srcDir, path.join(skillsDst, skillDir), { recursive: true });
-  }
-}
-
-function ensureGroupIpcDir(group: RegisteredGroup): string {
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
-  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
-  return groupIpcDir;
-}
-
-function addProfileMounts(
-  mounts: VolumeMount[],
-  personalMode: boolean,
-  group: RegisteredGroup,
-): void {
-  const profile = getAdminAgentProfile(group.folder);
-
-  if (
-    personalMode &&
-    (profile?.mountGmailTokens ?? true) &&
-    fs.existsSync(path.join(os.homedir(), '.gmail-mcp'))
-  ) {
-    mounts.push({
-      hostPath: path.join(os.homedir(), '.gmail-mcp'),
-      containerPath: '/home/node/.gmail-mcp',
-      readonly: false,
-    });
-  }
-
-  const outlookTokenFile = path.join(os.homedir(), '.outlook-mcp-tokens.json');
-  if (
-    personalMode &&
-    (profile?.mountOutlookTokens ?? true) &&
-    fs.existsSync(outlookTokenFile)
-  ) {
-    mounts.push({
-      hostPath: outlookTokenFile,
-      containerPath: '/home/node/.outlook-mcp-tokens.json',
-      readonly: false,
-    });
-  }
-
-  const figmaMcpDir = path.join(
-    os.homedir(),
-    'Projects',
-    'figmainhousemcp',
-    'dist',
-  );
-  if ((profile?.mountFigmaMcp ?? true) && fs.existsSync(figmaMcpDir)) {
-    mounts.push({
-      hostPath: figmaMcpDir,
-      containerPath: '/workspace/figma-mcp',
-      readonly: true,
-    });
-  }
-
-  if (personalMode && (profile?.allowGitAuth ?? true) && hasGitAuthDir()) {
-    mounts.push({
-      hostPath: getGitAuthPaths().hostDir,
-      containerPath: CONTAINER_GIT_AUTH_DIR,
-      readonly: false,
-    });
-  }
-}
-
-function resolveCaBundleMount(): {
-  hostPath: string;
-  containerPath: string;
-} | null {
-  const env = readEnvFile([
-    'WEB_FETCH_CA_BUNDLE',
-    'NODE_EXTRA_CA_CERTS',
-    'SSL_CERT_FILE',
-  ]);
-  const configuredPath =
-    env.WEB_FETCH_CA_BUNDLE?.trim() ||
-    env.NODE_EXTRA_CA_CERTS?.trim() ||
-    env.SSL_CERT_FILE?.trim();
-  if (!configuredPath) return null;
-
-  const hostPath = path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(process.cwd(), configuredPath);
-  if (!fs.existsSync(hostPath)) return null;
-
+/** Build a `ContainerConfig` from a DB row + agent group identity. */
+export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
   return {
-    hostPath,
-    containerPath: CONTAINER_CA_BUNDLE_PATH,
+    mcpServers: JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>,
+    packages: {
+      apt: JSON.parse(row.packages_apt) as string[],
+      npm: JSON.parse(row.packages_npm) as string[],
+    },
+    imageTag: row.image_tag ?? undefined,
+    additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
+    skills: JSON.parse(row.skills) as string[] | 'all',
+    provider: row.provider ?? undefined,
+    groupName: group.name,
+    assistantName: row.assistant_name ?? group.name,
+    agentGroupId: group.id,
+    maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
+    model: row.model ?? undefined,
+    effort: row.effort ?? undefined,
   };
 }
 
-function getSharedMainFolderAdditionalMounts(): AdditionalMount[] {
-  const groups = getAllRegisteredGroups();
-  const rcPersonalGroup = Object.values(groups).find(
-    (group) => group.folder === 'rc-personal',
-  );
-  return rcPersonalGroup?.containerConfig?.additionalMounts ?? [];
-}
+/**
+ * Materialize `container.json` from the DB. Called at spawn time so the
+ * container always sees fresh config. Returns the `ContainerConfig` for
+ * use by the caller (buildMounts, buildContainerArgs, etc.).
+ */
+export function materializeContainerJson(agentGroupId: string): ContainerConfig {
+  const group = getAgentGroup(agentGroupId);
+  if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
-function getSupervisorProjectMounts(): AdditionalMount[] {
-  return getSharedMainFolderAdditionalMounts().filter((mount) => {
-    const containerPath = mount.containerPath || path.basename(mount.hostPath);
-    return containerPath === 'projects';
-  });
-}
+  const row = getContainerConfig(agentGroupId);
+  if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-function mergeAdditionalMounts(
-  inheritedMounts: AdditionalMount[],
-  ownMounts: AdditionalMount[],
-): AdditionalMount[] {
-  const merged = new Map<string, AdditionalMount>();
+  const config = configFromDb(row, group);
 
-  for (const mount of inheritedMounts) {
-    const key = `${mount.hostPath}::${mount.containerPath || ''}`;
-    merged.set(key, mount);
-  }
+  const p = path.join(GROUPS_DIR, group.folder, 'container.json');
+  const dir = path.dirname(p);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
 
-  for (const mount of ownMounts) {
-    const key = `${mount.hostPath}::${mount.containerPath || ''}`;
-    merged.set(key, mount);
-  }
-
-  return [...merged.values()];
-}
-
-function resolveEffectiveAdditionalMounts(
-  group: RegisteredGroup,
-): AdditionalMount[] {
-  const ownMounts = group.containerConfig?.additionalMounts ?? [];
-  const profile = getAdminAgentProfile(group.folder);
-
-  if (profile?.mountProfile === 'supervisor') {
-    return ownMounts;
-  }
-  if (profile?.mountProfile === 'projects-readwrite') {
-    return mergeAdditionalMounts(getSupervisorProjectMounts(), ownMounts);
-  }
-  if (profile?.mountProfile === 'projects-readonly') {
-    const readonlyProjectMounts = getSupervisorProjectMounts().map((mount) => ({
-      ...mount,
-      readonly: true,
-    }));
-    return mergeAdditionalMounts(readonlyProjectMounts, ownMounts);
-  }
-  if (profile?.mountProfile === 'none') {
-    return ownMounts;
-  }
-
-  if (
-    group.folder === 'rc-personal' ||
-    !isMainFolder(group.folder, GROUPS_DIR)
-  ) {
-    return ownMounts;
-  }
-
-  const inheritedMounts = getSharedMainFolderAdditionalMounts();
-  if (inheritedMounts.length === 0) return ownMounts;
-  return mergeAdditionalMounts(inheritedMounts, ownMounts);
-}
-
-export function buildVolumeMounts(
-  group: RegisteredGroup,
-  isMain: boolean,
-): VolumeMount[] {
-  const mounts: VolumeMount[] = [];
-  const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
-
-  if (isMain) {
-    mounts.push({
-      hostPath: projectRoot,
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
-
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
-  }
-
-  mounts.push({
-    hostPath: groupDir,
-    containerPath: '/workspace/group',
-    readonly: false,
-  });
-
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    mounts.push({
-      hostPath: globalDir,
-      containerPath: '/workspace/global',
-      readonly: true,
-    });
-  }
-
-  const groupSessionsDir = ensureGroupSessionsDir(group);
-  syncContainerSkills(groupSessionsDir);
-  mounts.push({
-    hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
-    readonly: false,
-  });
-  mounts.push({
-    hostPath: path.join(path.dirname(groupSessionsDir), '.nanoclaw'),
-    containerPath: '/home/node/.nanoclaw',
-    readonly: false,
-  });
-
-  const groupIpcDir = ensureGroupIpcDir(group);
-  mounts.push({
-    hostPath: groupIpcDir,
-    containerPath: '/workspace/ipc',
-    readonly: false,
-  });
-
-  const personalMode = isMain || isPersonalFolder(group.folder, GROUPS_DIR);
-  addProfileMounts(mounts, personalMode, group);
-
-  const caBundleMount = resolveCaBundleMount();
-  if (caBundleMount) {
-    mounts.push({
-      hostPath: caBundleMount.hostPath,
-      containerPath: caBundleMount.containerPath,
-      readonly: true,
-    });
-  }
-
-  const additionalMounts = resolveEffectiveAdditionalMounts(group);
-  if (additionalMounts.length > 0) {
-    mounts.push(
-      ...validateAdditionalMounts(additionalMounts, group.name, personalMode),
-    );
-  }
-
-  return mounts;
-}
-
-export function buildContainerArgs(
-  mounts: VolumeMount[],
-  containerName: string,
-  personalMode = false,
-  envKeys?: string[],
-): string[] {
-  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
-  const backendConfig = getAgentBackendConfig();
-  const containerEnv = readEnvFile([
-    'WEB_FETCH_INSECURE_TLS',
-    'WEB_FETCH_CA_BUNDLE',
-    'NODE_EXTRA_CA_CERTS',
-    'SSL_CERT_FILE',
-  ]);
-  const caBundleMount = resolveCaBundleMount();
-  const insecureTls =
-    containerEnv.WEB_FETCH_INSECURE_TLS?.toLowerCase() === 'true';
-  const caBundle = caBundleMount?.containerPath || null;
-
-  args.push('-e', `TZ=${TIMEZONE}`);
-  args.push('-e', `NANOCLAW_AGENT_BACKEND=${backendConfig.backend}`);
-  if (backendConfig.model) {
-    args.push('-e', `AGENT_MODEL=${backendConfig.model}`);
-  }
-  args.push(
-    '-e',
-    `${backendConfig.containerBaseUrlEnvVar}=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
-  args.push('-e', `${backendConfig.containerCredentialEnvVar}=placeholder`);
-  if (mounts.some((mount) => mount.containerPath === CONTAINER_GIT_AUTH_DIR)) {
-    for (const [key, value] of Object.entries(getContainerGitAuthEnv())) {
-      args.push('-e', `${key}=${value}`);
-    }
-  }
-  for (const [key, value] of Object.entries(containerEnv)) {
-    if (
-      key === 'WEB_FETCH_CA_BUNDLE' ||
-      key === 'NODE_EXTRA_CA_CERTS' ||
-      key === 'SSL_CERT_FILE'
-    ) {
-      continue;
-    }
-    if (value) args.push('-e', `${key}=${value}`);
-  }
-  if (insecureTls) {
-    args.push('-e', 'NODE_TLS_REJECT_UNAUTHORIZED=0');
-  }
-  if (caBundle) {
-    args.push('-e', `WEB_FETCH_CA_BUNDLE=${caBundle}`);
-    args.push('-e', `NODE_EXTRA_CA_CERTS=${caBundle}`);
-    args.push('-e', `SSL_CERT_FILE=${caBundle}`);
-  }
-
-  args.push(...hostGatewayArgs());
-
-  if (personalMode) {
-    const defaultKeys = [
-      'JIRA_TOKEN',
-      'CONFLUENCE_READ_TOKEN',
-      'GITLAB_PERSONAL_ACCESS_TOKEN',
-      'RC_CLIENT_ID',
-      'RC_CLIENT_SECRET',
-      'RC_JWT',
-      'RC_SERVER',
-      'OUTLOOK_CLIENT_ID',
-      'OUTLOOK_CLIENT_SECRET',
-      'MS_TENANT_ID',
-      'JENKINS_URL',
-      'JENKINS_USER',
-      'JENKINS_TOKEN',
-    ];
-    const thirdPartyEnv = readEnvFile(envKeys ?? defaultKeys);
-    for (const [key, value] of Object.entries(thirdPartyEnv)) {
-      if (value) args.push('-e', `${key}=${value}`);
-    }
-  }
-
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
-  }
-
-  for (const mount of mounts) {
-    if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
-    } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
-    }
-  }
-
-  args.push(CONTAINER_IMAGE);
-  return args;
+  return config;
 }

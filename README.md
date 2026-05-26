@@ -12,7 +12,7 @@
   <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
   <a href="README_ja.md">日本語</a>&nbsp; • &nbsp;
   <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
-  <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="34.9k tokens, 17% of context window" valign="middle"></a>
+  <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
 
 ---
@@ -26,76 +26,61 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 ## Quick Start
 
 ```bash
-gh repo fork qwibitai/nanoclaw --clone
-cd nanoclaw
-claude
+git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+cd nanoclaw-v2
+bash nanoclaw.sh
 ```
+
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
 
 <details>
-<summary>Without GitHub CLI</summary>
+<summary><strong>Migrating from NanoClaw v1?</strong></summary>
 
-1. Fork [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw) on GitHub (click the Fork button)
-2. `git clone https://github.com/<your-username>/nanoclaw.git`
-3. `cd nanoclaw`
-4. `claude`
+Run from a fresh v2 checkout next to your v1 install:
+
+```bash
+git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
+cd nanoclaw-v2
+bash migrate-v2.sh
+```
+
+`migrate-v2.sh` finds your v1 install (sibling directory, or `NANOCLAW_V1_PATH=/path/to/nanoclaw`), migrates state into the v2 checkout, then `exec`s into Claude Code to finish the parts that need judgment (owner seeding, CLAUDE.local.md cleanup, fork-customisation replay).
+
+Run the script directly, not from inside a Claude session — the deterministic side needs interactive prompts and real shell I/O for Node/pnpm bootstrap, Docker, OneCLI, and the container build.
+
+**What it does:** merges `.env`, seeds the v2 DB from `registered_groups`, copies group folders + session data + scheduled tasks, installs the channel adapters you select, copies channel auth state (including Baileys keystore + LID mappings for WhatsApp), builds the agent container.
+
+**What it doesn't:** flip the system service. Pick *"switch to v2"* at the prompt, or do it manually after testing — your v1 install is left untouched.
+
+See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different and [docs/migration-dev.md](docs/migration-dev.md) for development notes.
 
 </details>
-
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup and service configuration.
-
-> **Note:** Commands prefixed with `/` (like `/setup`, `/add-whatsapp`) are [Claude Code skills](https://code.claude.com/docs/en/skills). Type them inside the `claude` CLI prompt, not in your regular terminal. If you don't have Claude Code installed, get it at [claude.com/product/claude-code](https://claude.com/product/claude-code).
-
-### Direct Setup Without Claude Skills
-
-If you are using the OpenAI backend, or you want to avoid Claude Code skill/login requirements during setup, you can run the setup steps directly from your terminal:
-
-```bash
-./setup.sh
-node --import tsx ./setup/index.ts --step environment
-node --import tsx ./setup/index.ts --step container --runtime docker
-node --import tsx ./setup/index.ts --step service
-node --import tsx ./setup/index.ts --step verify
-```
-
-This produces the same host-side setup outcome without using `/setup`.
-
-If you override `CONTAINER_IMAGE` in `.env`, make sure the image tag you build matches that value. For example, if `.env` contains `CONTAINER_IMAGE=nanoclaw-agent-v3:latest`, build that exact tag:
-
-```bash
-docker build -t nanoclaw-agent-v3:latest container/
-```
 
 ## Philosophy
 
 **Small enough to understand.** One process, a few source files and no microservices. If you want to understand the full NanoClaw codebase, just ask Claude Code to walk you through it.
 
-**Secure by isolation.** Agents run in Linux containers (Apple Container on macOS, or Docker) and they can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
+**Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
 
 **Built for the individual user.** NanoClaw isn't a monolithic framework; it's software that fits each user's exact needs. Instead of becoming bloatware, NanoClaw is designed to be bespoke. You make your own fork and have Claude Code modify it to match your needs.
 
 **Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that it's safe to make changes.
 
-**AI-native.**
+**AI-native, hybrid by design.** The install and onboarding flow is an optimized scripted path, fast and deterministic. When a step needs judgment, whether a failed install, a guided decision, or a customization, control hands off to Claude Code seamlessly. Beyond setup there's no monitoring dashboard or debugging UI either: describe the problem in chat and Claude Code handles it.
 
-- No installation wizard; Claude Code guides setup.
-- No monitoring dashboard; ask Claude what's happening.
-- No debugging tools; describe the problem and Claude fixes it.
+**Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Ollama) live on `providers`. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
 
-**Skills over features.** Instead of adding features (e.g. support for Telegram) to the codebase, contributors submit [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
-
-**Best harness, best model.** NanoClaw runs on the Claude Agent SDK, which means you're running Claude Code directly. Claude Code is highly capable and its coding and problem-solving capabilities allow it to modify and expand NanoClaw and tailor it to each user.
+**Best harness, best model.** NanoClaw natively uses Claude Code via Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's full toolset, including the ability to modify and expand your own NanoClaw fork. Other providers are drop-in options: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek and more via OpenCode, and `/add-ollama-provider` for local open-weight models. Provider is configurable per agent group.
 
 ## What It Supports
 
-- **Multi-channel messaging** - Talk to your assistant from WhatsApp, Telegram, Discord, Slack, or Gmail. Add channels with skills like `/add-whatsapp` or `/add-telegram`. Run one or many at the same time.
-- **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted to it.
-- **Main channel** - Your private channel (self-chat) for admin control; every group is completely isolated
-- **Scheduled tasks** - Recurring jobs that run Claude and can message you back
-- **Web access** - Search and fetch content from the Web
-- **Container isolation** - Agents are sandboxed in Docker (macOS/Linux), [Docker Sandboxes](docs/docker-sandboxes.md) (micro VM isolation), or Apple Container (macOS)
-- **Credential security** - Agents never hold raw API keys. Outbound requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects credentials at request time and enforces per-agent policies and rate limits.
-- **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
-- **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
+- **Multi-channel messaging** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
+- **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
+- **Per-agent workspace** — each agent group has its own `CLAUDE.md`, its own memory, its own container, and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
+- **Scheduled tasks** — recurring jobs that run Claude and can message you back
+- **Web access** — search and fetch content from the web
+- **Container isolation** — agents are sandboxed in Docker (macOS/Linux/WSL2), with optional [Docker Sandboxes](docs/docker-sandboxes.md) micro-VM isolation or Apple Container as a macOS-native opt-in
+- **Credential security** — agents never hold raw API keys. Outbound requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects credentials at request time and enforces per-agent policies and rate limits.
 
 ## Usage
 
@@ -107,8 +92,7 @@ Talk to your assistant with the trigger word (default: `@Andy`):
 @Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
 ```
 
-From the main channel (your self-chat), you can manage groups and tasks:
-
+From a channel you own or administer, you can manage groups and tasks:
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
@@ -132,76 +116,58 @@ The codebase is small enough that Claude can safely modify it.
 
 **Don't add features. Add skills.**
 
-If you want to add Telegram support, don't create a PR that adds Telegram to the core codebase. Instead, fork NanoClaw, make the code changes on a branch, and open a PR. We'll create a `skill/telegram` branch from your PR that other users can merge into their fork.
+If you want to add a new channel or agent provider, don't add it to trunk. New channel adapters land on the `channels` branch; new agent providers land on `providers`. Users install them in their own fork with `/add-<name>` skills, which copy the relevant module(s) into the standard paths, wire the registration, and pin dependencies.
 
-Users then run `/add-telegram` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
+This keeps trunk as pure registry and infra, and every fork stays lean — users get the channels and providers they asked for and nothing else.
 
 ### RFS (Request for Skills)
 
 Skills we'd like to see:
 
 **Communication Channels**
-
-- `/add-signal` - Add Signal as a channel
+- `/add-signal` — Add Signal as a channel
 
 ## Requirements
 
-- macOS, Linux, or Windows (via WSL2)
-- Node.js 20+
-- [Claude Code](https://claude.ai/download)
-- [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
+- macOS or Linux (Windows via WSL2)
+- Node.js 20+ and pnpm 10+ (the installer will install both if missing)
+- [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
+- [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
 
 ## Architecture
 
 ```
-Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+messaging apps → host process (router) → inbound.db → container (Bun, Claude Agent SDK) → outbound.db → host process (delivery) → messaging apps
 ```
 
-Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Per-group message queue with concurrency control. IPC via filesystem.
+A single Node host orchestrates per-session agent containers. When a message arrives, the host routes it via the entity model (user → messaging group → agent group → session), writes it to the session's `inbound.db`, and wakes the container. The agent-runner inside the container polls `inbound.db`, runs Claude, and writes responses to `outbound.db`. The host polls `outbound.db` and delivers back through the channel adapter.
 
-Current local forks often carry additional seams for session persistence, IPC handling, security policy, and upstream merge hardening. For the current checked-in module map, see [ARCHITECTURE.md](ARCHITECTURE.md). For upstream concepts, see the [documentation site](https://docs.nanoclaw.dev/concepts/architecture).
-For contributor-facing extension points, see [docs/EXTENDING.md](docs/EXTENDING.md).
+Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping. Channels and alternative providers self-register at startup; trunk ships the registry and the Chat SDK bridge, while the adapters themselves are skill-installed per fork.
+
+For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
 
 Key files:
-
-- `src/index.ts` - Startup composition root
-- `src/bootstrap/start-app.ts` - Host bootstrap composition
-- `src/app-runtime-state.ts` - Persisted runtime state and registered groups
-- `src/app-processing.ts` - Message-loop and per-chat processing adapters
-- `src/channels/registry.ts` - Channel registry (self-registration at startup)
-- `src/agent-backends.ts` - Host-side agent backend catalog
-- `src/ipc.ts` - Thin IPC barrel
-- `src/ipc-watcher.ts` - IPC transport loop
-- `src/router.ts` - Message formatting and outbound routing
-- `src/group-queue.ts` - Per-group queue with global concurrency limit
-- `src/container-contract.ts` - Host/container protocol markers and types
-- `src/container-runner.ts` - Spawns streaming agent containers
-- `src/task-scheduler.ts` - Runs scheduled tasks
-- `src/db.ts` - SQLite operations (messages, groups, sessions, state)
-- `setup/steps.ts` - Setup step registry and CLI help surface
-- `groups/*/CLAUDE.md` - Per-group memory
-
-## Extension Points
-
-- Channels: add adapters in `src/channels/` and register them through `src/channels/registry.ts`
-- Agent backends: add host metadata in `src/agent-backends.ts` and container providers in `container/agent-runner/src/providers/`
-- Setup flow: add steps in `setup/` and register them in `setup/steps.ts`
-
-You can inspect the current setup surface with:
-
-```bash
-npm run setup -- --list
-```
+- `src/index.ts` — entry point: DB init, channel adapters, delivery polls, sweep
+- `src/router.ts` — inbound routing: messaging group → agent group → session → `inbound.db`
+- `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
+- `src/host-sweep.ts` — 60s sweep: stale detection, due-message wake, recurrence
+- `src/session-manager.ts` — resolves sessions, opens `inbound.db` / `outbound.db`
+- `src/container-runner.ts` — spawns per-agent-group containers, OneCLI credential injection
+- `src/db/` — central DB (users, roles, agent groups, messaging groups, wiring, migrations)
+- `src/channels/` — channel adapter infra (adapters installed via `/add-<channel>` skills)
+- `src/providers/` — host-side provider config (`claude` baked in; others via skills)
+- `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
+- `groups/<folder>/` — per-agent-group filesystem (`CLAUDE.md`, skills, container config)
 
 ## FAQ
 
 **Why Docker?**
 
-Docker provides cross-platform support (macOS, Linux and even Windows via WSL2) and a mature ecosystem. On macOS, you can optionally switch to Apple Container via `/convert-to-apple-container` for a lighter-weight native runtime. For additional isolation, [Docker Sandboxes](docs/docker-sandboxes.md) run each container inside a micro VM.
+Docker provides cross-platform support (macOS, Linux and Windows via WSL2) and a mature ecosystem. On macOS, you can optionally switch to Apple Container via `/convert-to-apple-container` for a lighter-weight native runtime. For additional isolation, [Docker Sandboxes](docs/docker-sandboxes.md) run each container inside a micro VM.
 
 **Can I run this on Linux or Windows?**
 
-Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via WSL2). Just run `/setup`.
+Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via WSL2). Just run `bash nanoclaw.sh`.
 
 **Is this secure?**
 
@@ -213,65 +179,14 @@ We don't want configuration sprawl. Every user should customize NanoClaw so that
 
 **Can I use third-party or open-source models?**
 
-Yes. NanoClaw now has a pluggable agent backend.
+Yes. The supported path is `/add-opencode` (OpenRouter, OpenAI, Google, DeepSeek, and more via OpenCode config) or `/add-ollama-provider` (local open-weight models via Ollama). Both are configurable per agent group, so different agents can run on different backends in the same install.
 
-**Claude backend (default)**
-
-```bash
-AGENT_BACKEND=claude
-ANTHROPIC_API_KEY=your-key-here
-```
-
-You can also point Claude at any Claude API-compatible endpoint:
+For one-off experiments, any Claude API-compatible endpoint also works via `.env`:
 
 ```bash
-AGENT_BACKEND=claude
 ANTHROPIC_BASE_URL=https://your-api-endpoint.com
 ANTHROPIC_AUTH_TOKEN=your-token-here
 ```
-
-**OpenAI-compatible backend**
-
-```bash
-AGENT_BACKEND=openai
-AGENT_MODEL=gpt-5
-OPENAI_API_KEY=your-openai-key-here
-# Optional:
-# OPENAI_BASE_URL=https://your-openai-compatible-endpoint.com/v1
-```
-
-This OpenAI backend is useful when your Claude Code quota is constrained or when you want to switch models quickly, but it is not yet feature-parity with the Claude backend:
-
-- Claude remains the full NanoClaw agent path with Claude Code tools, MCP integration, agent teams, and native session resumption.
-- The OpenAI backend currently provides text-only turns with per-group conversation persistence, which is enough to prove the backend abstraction and support model switching.
-
-You can extend the backend interface to add more CLIs or model providers later without rewriting the host orchestrator.
-
-**NotebookLM Enterprise source tools**
-
-NanoClaw can also manage NotebookLM Enterprise notebooks and sources through its existing tool path. This does not replace the Claude/OpenAI backend; it adds explicit tools for notebook creation and source ingestion.
-
-```bash
-NOTEBOOKLM_PROJECT_NUMBER=123456789012
-NOTEBOOKLM_LOCATION=global
-NOTEBOOKLM_ENDPOINT_LOCATION=global
-```
-
-Authentication is host-side via `gcloud`:
-
-```bash
-gcloud auth login
-gcloud auth print-access-token
-```
-
-The new tools are:
-
-- `list_notebooklm_notebooks`
-- `create_notebooklm_notebook`
-- `get_notebooklm_notebook`
-- `add_notebooklm_sources`
-
-`add_notebooklm_sources` supports raw text, web URLs, and local files. File uploads are intentionally restricted to NanoClaw-owned paths: the current group folder, `groups/global`, and the repo root when invoked from the main group.
 
 **How do I debug issues?**
 
@@ -279,13 +194,13 @@ Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?"
 
 **Why isn't the setup working for me?**
 
-If you have issues, during setup, Claude will try to dynamically fix them. If that doesn't work, run `claude`, then run `/debug`. If Claude finds an issue that is likely affecting other users, open a PR to modify the setup SKILL.md.
+If a step fails, `nanoclaw.sh` hands off to Claude Code to diagnose and resume. If that doesn't resolve it, run `claude`, then `/debug`. If Claude identifies an issue likely to affect other users, open a PR against the relevant setup step or skill.
 
 **What changes will be accepted into the codebase?**
 
 Only security fixes, bug fixes, and clear improvements will be accepted to the base configuration. That's all.
 
-Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills.
+Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills on the `channels` or `providers` branch.
 
 This keeps the base system minimal and lets every user customize their installation without inheriting features they don't want.
 
@@ -300,3 +215,5 @@ See [CHANGELOG.md](CHANGELOG.md) for breaking changes, or the [full release hist
 ## License
 
 MIT
+
+<img referrerpolicy="no-referrer-when-downgrade" src="https://static.scarf.sh/a.png?x-pxid=47894bd5-353b-42fe-bb97-74144e6df0bf" />
