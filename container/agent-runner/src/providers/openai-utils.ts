@@ -32,7 +32,7 @@ const SEND_ON_BEHALF_STALE_PATTERNS = [
 ];
 
 const THIRD_PARTY_MCP_STALE_PATTERNS = [
-  /don.?t have (?:a|any).*(?:jira|gitlab|atlassian|gmail|figma|m365|outlook).*(?:mcp|tool)/i,
+  /(?:don.?t|do not) have (?:a|any).*(?:jira|gitlab|atlassian|gmail|figma|m365|outlook).*(?:mcp|tool)/i,
   /(?:jira|gitlab|atlassian|gmail|figma|m365|outlook).*(?:mcp|tool).*(?:not currently|not available|unavailable)/i,
   /don.?t have .*specific mcp tools exposed here/i,
   /dedicated (?:jira|gitlab|atlassian|gmail|figma|m365).*(?:connector|tool).*(?:not currently|unavailable)/i,

@@ -3,6 +3,10 @@
 
 FROM node:22-slim
 
+ARG NPM_CONFIG_REGISTRY
+
+RUN if [ -n "$NPM_CONFIG_REGISTRY" ]; then npm config set registry "$NPM_CONFIG_REGISTRY"; fi
+
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
     chromium \
@@ -54,7 +58,7 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Create entrypoint script.
+# Copy entrypoint script.
 # Container input (prompt, group info) is passed via stdin JSON.
 # Credentials are injected by the host's credential proxy — never passed here.
 # Runs from the image-compiled /app/dist/ (owned by root, not writable by the node user)
@@ -63,32 +67,7 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # When the host runs the container as an arbitrary UID/GID (for bind-mounted
 # repo ownership parity), OpenSSH requires that UID to resolve to a passwd
 # entry. Use nss_wrapper to synthesize one at startup when needed.
-RUN cat <<'EOF' > /app/entrypoint.sh
-#!/bin/bash
-set -e
-
-CURRENT_UID="$(id -u)"
-CURRENT_GID="$(id -g)"
-NSS_WRAPPER_LIB="/usr/lib/x86_64-linux-gnu/libnss_wrapper.so"
-
-if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_UID}:${CURRENT_GID}:" /etc/passwd; then
-  if [ -f "${NSS_WRAPPER_LIB}" ]; then
-    export LD_PRELOAD="${NSS_WRAPPER_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
-    export NSS_WRAPPER_PASSWD=/tmp/nss-wrapper.passwd
-    export NSS_WRAPPER_GROUP=/tmp/nss-wrapper.group
-
-    cp /etc/passwd "${NSS_WRAPPER_PASSWD}"
-    cp /etc/group "${NSS_WRAPPER_GROUP}"
-
-    echo "nanoclaw:x:${CURRENT_UID}:${CURRENT_GID}:NanoClaw:${HOME:-/home/node}:/bin/sh" >> "${NSS_WRAPPER_PASSWD}"
-    if ! grep -Eq "^[^:]*:[^:]*:${CURRENT_GID}:" /etc/group; then
-      echo "nanoclaw:x:${CURRENT_GID}:" >> "${NSS_WRAPPER_GROUP}"
-    fi
-  fi
-fi
-
-exec node /app/dist/index.js
-EOF
+COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # Allow git to operate in bind-mounted directories owned by any UID.
