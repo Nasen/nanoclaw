@@ -263,7 +263,7 @@ class RingCentralAdapter implements ChannelAdapter {
     return [...chats, ...teams]
       .filter((chat): chat is RcChatListItem & { id: string } => typeof chat.id === 'string')
       .map((chat) => ({
-        platformId: chat.id,
+        platformId: this.formatPlatformId(chat.id),
         name: chat.name || chat.id,
         isGroup: chat.type?.toLowerCase() !== 'direct',
       }));
@@ -273,7 +273,7 @@ class RingCentralAdapter implements ChannelAdapter {
     if (!this.platform) return null;
     const chatId = this.normalizeChatId(platformId);
     const matches = await this.syncConversations();
-    return matches.find((chat) => chat.platformId === chatId)?.name ?? null;
+    return matches.find((chat) => chat.platformId === this.formatPlatformId(chatId))?.name ?? null;
   }
 
   private async handleEvent(event: unknown, config: ChannelSetup): Promise<void> {
@@ -296,8 +296,9 @@ class RingCentralAdapter implements ChannelAdapter {
     const text = isMention ? body.text.replaceAll(mentionToken, `@${ASSISTANT_NAME}`) : body.text;
     const timestamp = body.creationTime ? new Date(body.creationTime).toISOString() : new Date().toISOString();
 
-    config.onMetadata(body.groupId, undefined, true);
-    await config.onInbound(body.groupId, null, {
+    const platformId = this.formatPlatformId(body.groupId);
+    config.onMetadata(platformId, undefined, true);
+    await config.onInbound(platformId, null, {
       id: body.id ?? `rc-${Date.now()}`,
       kind: 'chat',
       timestamp,
@@ -315,6 +316,11 @@ class RingCentralAdapter implements ChannelAdapter {
     if (chatRef.startsWith('rcb:')) return chatRef.slice(4);
     if (chatRef.startsWith('rc:')) return chatRef.slice(3);
     return chatRef;
+  }
+
+  private formatPlatformId(chatId: string): string {
+    const raw = this.normalizeChatId(chatId);
+    return `${this.channelType}:${raw}`;
   }
 
   private trackSent(postId: string): void {
